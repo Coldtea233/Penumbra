@@ -95,6 +95,7 @@ public sealed partial class MainWindow : Window
         CenterXBox.Value = s.CenterX * 100; CenterYBox.Value = s.CenterY * 100;
         TintCombo.SelectedIndex = s.Tint; MonitorCombo.SelectedIndex = s.PrimaryOnly ? 1 : 0;
         DarkenIconsCheckBox.IsChecked = s.DarkenIcons;
+        FocusOnlyCheckBox.IsChecked = s.FocusOnly;
         ready = wasReady;
         if (wasReady) SchedulePreviewRender();
     }
@@ -105,7 +106,7 @@ public sealed partial class MainWindow : Window
         return new(OpacitySlider.Value / 100, RadiusSlider.Value / 100, FeatherSlider.Value / 100,
             ShapeSlider.Value / 100, Math.Clamp(CenterXBox.Value / 100, 0, 1), Math.Clamp(CenterYBox.Value / 100, 0, 1),
             Math.Clamp(TintCombo.SelectedIndex, 0, 2), MonitorCombo.SelectedIndex == 1,
-            DarkenIconsCheckBox.IsChecked == true);
+            DarkenIconsCheckBox.IsChecked == true, FocusOnlyCheckBox.IsChecked == true);
     }
     private void Parameter_Changed(object sender, RangeBaseValueChangedEventArgs e)
     {

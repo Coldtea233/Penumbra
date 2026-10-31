@@ -88,6 +88,10 @@
             <ComboBoxItem Content="所有屏幕 · 每屏独立暗角"/><ComboBoxItem Content="仅主屏幕"/>
           </ComboBox>
           <CheckBox x:Name="DarkenIconsCheckBox" Content="压暗桌面图标" Checked="IconOption_Changed" Unchecked="IconOption_Changed"/>
+          <StackPanel Spacing="6" Margin="0,4,0,0">
+            <CheckBox x:Name="FocusOnlyCheckBox" Content="仅其他应用聚焦时启用暗角"/>
+            <TextBlock Text="桌面聚焦时舒展淡出，切回应用时淡入。独立于 Windows 动画设置，点击应用后生效。" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+          </StackPanel>
         </StackPanel>
       </Grid>
     </ScrollViewer>
