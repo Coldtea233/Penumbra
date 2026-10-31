@@ -147,6 +147,9 @@ public sealed partial class MainWindow : Window
         SettingsLayout.ColumnSpacing = wide ? 28 : 0;
         Grid.SetColumn(ParameterPanel, wide ? 1 : 0);
         Grid.SetRow(ParameterPanel, wide ? 0 : 1);
+        Grid.SetRowSpan(ParameterPanel, wide ? 2 : 1);
+        Grid.SetRow(AboutSection, wide ? 1 : 2);
+        AboutSection.Margin = wide ? new Thickness(0, 24, 24, 0) : new Thickness(0, 24, 0, 0);
         ParameterPanel.Margin = wide ? new Thickness(8, 8, 0, 0) : new Thickness(0, 24, 0, 0);
     }
     private void Preview_SizeChanged(object sender, SizeChangedEventArgs e)

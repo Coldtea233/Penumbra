@@ -9,6 +9,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <psapi.h>
+#include <dwmapi.h>
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -19,7 +20,7 @@
 #include "focus_animation.h"
 
 // Event-driven at rest. A short-lived timer exists only during a transition.
-constexpr UINT TrayMessage = WM_APP + 1, ReorderMessage = WM_APP + 2, IconMessage = WM_APP + 3, FocusMessage = WM_APP + 4, TrayId = 1;
+constexpr UINT TrayMessage = WM_APP + 1, ReorderMessage = WM_APP + 2, IconMessage = WM_APP + 3, WindowStateMessage = WM_APP + 4, TrayId = 1;
 constexpr UINT SettingsId = 101, ReloadId = 102, PauseId = 103, ExitId = 104;
 struct Params { double opacity=.68, radius=.48, feather=.65, shape=1, cx=.5, cy=.5; int tint=0; bool primary=false, darkenIcons=false, focusOnly=false; };
 struct Bitmap {
@@ -44,8 +45,9 @@ struct Bitmap {
         return previous!=nullptr;
     }
 };
-struct AnimationFrame { Bitmap texture, output; };
-struct Surface { HWND hwnd{}; RECT rect{}; std::unique_ptr<AnimationFrame> frame; };
+// Windows retains the submitted layered bitmap. Reuse it for every focus fade;
+// no full-screen DIB, GDI scaling or per-pixel icon work on the animation path.
+struct Surface { HWND hwnd{}; RECT rect{}; bool uploaded=false; BYTE opacity=0; };
 HINSTANCE instance;
 HWND controller{}, desktop{}, icons{};
 HWND iconList{};
@@ -53,18 +55,25 @@ HANDLE stopEvent{}, reloadEvent{}, appliedEvent{};
 HANDLE animationTick{};
 UINT taskbarCreated;
 UINT previewMessage;
-HWINEVENTHOOK foregroundHook{}, minimizeHook{}, reorderHook{}, iconHook{};
+HWINEVENTHOOK foregroundHook{}, minimizeHook{}, reorderHook{}, iconHook{}, windowHook{}, cloakHook{};
 std::vector<Surface> surfaces;
 Params params;
 bool paused=false, capturingPreview=false;
 bool iconsDirty=false, animationTimerArmed=false;
-bool focusPending=false, reorderPending=false, iconPending=false;
+bool windowStatePending=false, reorderPending=false, iconPending=false;
+double frameIntervalMs=1000.0/60, detectedRefreshHz=0, nextFrameAt=0;
 focus_animation::Transition transition;
 // Opt-in diagnostics only. Keep samples in memory during the animation and
 // write once at rest, so tracing cannot stall each frame with disk I/O.
-bool traceAnimation=false;
-struct FrameTrace { uint64_t tick; double value; bool target, visible; };
+bool traceAnimation=false, traceFileOutput=true;
+struct FrameTrace { double tick, value, submitMs; bool target, visible; };
 std::vector<FrameTrace> frameTrace;
+double lastSubmitMs=0;
+double ClockMs() {
+    static const double ticksPerMs=[] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart/1000.0; }();
+    LARGE_INTEGER counter{}; QueryPerformanceCounter(&counter);
+    return counter.QuadPart/ticksPerMs;
+}
 struct IconMask {
     RECT rect{};
     int width=0, height=0;
@@ -82,16 +91,16 @@ std::wstring configDir, configFile;
 void TraceFrame(double value) {
     if(!traceAnimation || frameTrace.size()>=4096) return;
     bool visible=!surfaces.empty()&&IsWindowVisible(surfaces.front().hwnd);
-    frameTrace.push_back({GetTickCount64(),value,transition.Target(),visible});
+    frameTrace.push_back({ClockMs(),value,lastSubmitMs,transition.Target(),visible});
 }
 void FlushFrameTrace() {
-    if(frameTrace.empty()) return;
+    if(frameTrace.empty()||!traceFileOutput) return;
     FILE* file=_wfopen((configDir+L"\\animation-trace.csv").c_str(),L"a");
     if(file) {
         for(const auto& frame:frameTrace)
-            std::fprintf(file,"%llu,%d,%.6f,%.6f,%.6f,%d\n",
-                (unsigned long long)frame.tick,frame.target,frame.value,
-                focus_animation::Scale(frame.value),focus_animation::Opacity(frame.value),frame.visible);
+            std::fprintf(file,"%.3f,%d,%.6f,1.000000,%.6f,%d,%.4f\n",
+                frame.tick,frame.target,frame.value,
+                focus_animation::Opacity(frame.value),frame.visible,frame.submitMs);
         std::fclose(file);
     }
     frameTrace.clear();
@@ -161,14 +170,36 @@ ForegroundKind ClassifyForeground(HWND foreground) {
     // File Explorer windows are applications, not the desktop itself.
     return ForegroundKind::Application;
 }
-void TraceFocus(const char* reason) {
+bool IsApplicationWindow(HWND hwnd) {
+    if(!IsWindowVisible(hwnd)||IsIconic(hwnd)||GetAncestor(hwnd,GA_ROOT)!=hwnd) return false;
+    LONG_PTR extended=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
+    if(extended&(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE)) return false;
+    DWORD cloaked=0;
+    if(SUCCEEDED(DwmGetWindowAttribute(hwnd,DWMWA_CLOAKED,&cloaked,sizeof(cloaked)))&&cloaked) return false;
+    RECT rect{},intersection{},screen{GetSystemMetrics(SM_XVIRTUALSCREEN),GetSystemMetrics(SM_YVIRTUALSCREEN),0,0};
+    screen.right=screen.left+GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    screen.bottom=screen.top+GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if(!GetWindowRect(hwnd,&rect)||!IntersectRect(&intersection,&rect,&screen)) return false;
+    return ClassifyForeground(hwnd)==ForegroundKind::Application;
+}
+BOOL CALLBACK FindApplicationWindow(HWND hwnd,LPARAM data) {
+    if(!IsApplicationWindow(hwnd)) return TRUE;
+    *reinterpret_cast<bool*>(data)=true;
+    return FALSE;
+}
+bool HasApplicationWindow() {
+    bool found=false;
+    EnumWindows(FindApplicationWindow,reinterpret_cast<LPARAM>(&found));
+    return found;
+}
+void TraceWindowState(const char* reason) {
     if(!traceAnimation) return;
     HWND foreground=GetForegroundWindow();
     wchar_t name[128]{}; GetClassNameW(foreground,name,128);
     FILE* file=_wfopen((configDir+L"\\animation-diagnostics.txt").c_str(),L"a");
     if(file) {
-        std::fprintf(file,"%llu %s opacity=%.3f focusOnly=%d foreground=%p root=%p desktop=%p kind=%d class=%ls target=%d paused=%d\n",
-            (unsigned long long)GetTickCount64(),reason,params.opacity,params.focusOnly,foreground,
+        std::fprintf(file,"%llu %s opacity=%.3f windowsOnly=%d applicationWindows=%d foreground=%p root=%p desktop=%p kind=%d class=%ls target=%d paused=%d\n",
+            (unsigned long long)GetTickCount64(),reason,params.opacity,params.focusOnly,HasApplicationWindow(),foreground,
             GetAncestor(foreground,GA_ROOT),desktop,(int)ClassifyForeground(foreground),name,transition.Target(),paused);
         std::fclose(file);
     }
@@ -218,14 +249,12 @@ bool ReadIconMask(IconMask& mask) {
     return ok;
 }
 void DropSurface(Surface& s) {
-    s.frame.reset();
     if(IsWindow(s.hwnd)) DestroyWindow(s.hwnd);
-    s.hwnd=nullptr;
+    s.hwnd=nullptr; s.uploaded=false; s.opacity=0;
 }
 void StopAnimation() {
     if(animationTick) { CancelWaitableTimer(animationTick); CloseHandle(animationTick); animationTick=nullptr; }
     animationTimerArmed=false;
-    for(auto& s:surfaces) s.frame.reset();
 }
 void Clear() { StopAnimation(); FlushFrameTrace(); for(auto& s:surfaces) DropSurface(s); surfaces.clear(); }
 bool PositionSurface(Surface& s, bool show) {
@@ -247,9 +276,15 @@ bool PositionSurface(Surface& s, bool show) {
         s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,SWP_NOACTIVATE|SWP_SHOWWINDOW)!=FALSE;
 }
 BOOL CALLBACK CollectMonitor(HMONITOR monitor,HDC,LPRECT,LPARAM data) {
-    MONITORINFO info{sizeof(info)};
-    if(GetMonitorInfoW(monitor,&info) && (!params.primary || (info.dwFlags&MONITORINFOF_PRIMARY)))
+    MONITORINFOEXW info{}; info.cbSize=sizeof(info);
+    if(GetMonitorInfoW(monitor,&info) && (!params.primary || (info.dwFlags&MONITORINFOF_PRIMARY))) {
         reinterpret_cast<std::vector<RECT>*>(data)->push_back(info.rcMonitor);
+        DEVMODEW mode{}; mode.dmSize=sizeof(mode);
+        if(EnumDisplaySettingsW(info.szDevice,ENUM_CURRENT_SETTINGS,&mode)&&mode.dmDisplayFrequency>=24) {
+            detectedRefreshHz=std::max(detectedRefreshHz,(double)std::min<DWORD>(240,mode.dmDisplayFrequency));
+            frameIntervalMs=1000.0/detectedRefreshHz;
+        }
+    }
     return TRUE;
 }
 bool CreateSurface(Surface& s) {
@@ -288,37 +323,27 @@ void ProtectIcons(Bitmap& bitmap,const RECT& rect) {
 bool Submit(Surface& s,Bitmap& bitmap,BYTE opacity) {
     POINT source{}, destination{s.rect.left,s.rect.top};
     SIZE size{bitmap.width,bitmap.height}; BLENDFUNCTION blend{AC_SRC_OVER,0,opacity,AC_SRC_ALPHA};
-    return UpdateLayeredWindow(s.hwnd,nullptr,&destination,&size,bitmap.dc,&source,0,&blend,ULW_ALPHA)!=FALSE;
+    bool ok=UpdateLayeredWindow(s.hwnd,nullptr,&destination,&size,bitmap.dc,&source,0,&blend,ULW_ALPHA)!=FALSE;
+    if(ok) { s.uploaded=true; s.opacity=opacity; }
+    return ok;
 }
-bool Render(Surface& s) {
+bool Render(Surface& s,BYTE opacity=255) {
     Bitmap bitmap;
     if(!CreateSurface(s)||!bitmap.Create(s.rect.right-s.rect.left,s.rect.bottom-s.rect.top)) return false;
     FillVignette(bitmap); ProtectIcons(bitmap,s.rect);
-    return Submit(s,bitmap,255);
+    return Submit(s,bitmap,opacity);
 }
 bool RenderAnimation(Surface& s,double visibility) {
-    if(!CreateSurface(s)) return false;
-    if(!s.frame) {
-        auto frame=std::make_unique<AnimationFrame>();
-        int width=s.rect.right-s.rect.left, height=s.rect.bottom-s.rect.top;
-        double ratio=std::min(1.0,1024.0/std::max(width,height));
-        if(!frame->texture.Create(std::max(1,(int)std::lround(width*ratio)),std::max(1,(int)std::lround(height*ratio))) ||
-            !frame->output.Create(width,height)) return false;
-        FillVignette(frame->texture);
-        // COLORONCOLOR preserves premultiplied alpha in 32-bit DIBs.
-        SetStretchBltMode(frame->output.dc,COLORONCOLOR);
-        s.frame=std::move(frame);
-    }
-    auto& frame=*s.frame;
-    double scale=focus_animation::Scale(visibility);
-    int width=std::clamp((int)std::lround(frame.texture.width/scale),1,frame.texture.width);
-    int height=std::clamp((int)std::lround(frame.texture.height/scale),1,frame.texture.height);
-    int x=std::clamp((int)std::lround(params.cx*(frame.texture.width-width)),0,frame.texture.width-width);
-    int y=std::clamp((int)std::lround(params.cy*(frame.texture.height-height)),0,frame.texture.height-height);
-    if(!StretchBlt(frame.output.dc,0,0,frame.output.width,frame.output.height,frame.texture.dc,x,y,width,height,SRCCOPY)) return false;
-    GdiFlush(); // Complete the GDI copy before writing fixed-position icon holes.
-    ProtectIcons(frame.output,s.rect);
-    return Submit(s,frame.output,(BYTE)std::lround(255*focus_animation::Opacity(visibility)));
+    BYTE opacity=(BYTE)std::lround(255*focus_animation::Opacity(visibility));
+    if(!s.uploaded||!IsWindow(s.hwnd)) return Render(s,opacity);
+    if(s.opacity==opacity) return true;
+    BLENDFUNCTION blend{AC_SRC_OVER,0,opacity,AC_SRC_ALPHA};
+    // A null source DC preserves the existing bitmap; ULW_ALPHA updates its
+    // compositor constant alpha only. Do NOT use SetLayeredWindowAttributes:
+    // it prevents later UpdateLayeredWindow bitmap updates on this HWND.
+    bool ok=UpdateLayeredWindow(s.hwnd,nullptr,nullptr,nullptr,nullptr,nullptr,0,&blend,ULW_ALPHA)!=FALSE;
+    if(ok) s.opacity=opacity;
+    return ok;
 }
 void FailTransition() {
     StopAnimation(); transition.Reset(false);
@@ -326,19 +351,17 @@ void FailTransition() {
     Status(L"暗角动画提交失败 · 已安全隐藏，可从托盘重新挂接");
 }
 void AdvanceAnimation() {
-    uint64_t now=GetTickCount64();
+    double now=ClockMs(), submittedAt=now;
     bool running=transition.Running(now), visible=transition.Target();
     if(!running) {
         transition.Reset(visible);
         for(auto& s:surfaces) {
-            if(!visible) DropSurface(s);
-            // Submit the exact endpoint of this animation, then free its CPU
-            // buffers. Recomputing millions of pixels here used to stall the
-            // foreground event queue and visibly snap to a different bitmap.
-            else if(!(s.frame?RenderAnimation(s,1):Render(s))||!PositionSurface(s,true)) { FailTransition(); return; }
+            if(!visible) { if(s.hwnd) ShowWindow(s.hwnd,SW_HIDE); }
+            else if(!RenderAnimation(s,1)||!PositionSurface(s,true)) { FailTransition(); return; }
         }
         StopAnimation();
         if(iconsDirty&&visible&&controller) SetTimer(controller,5,120,nullptr);
+        lastSubmitMs=ClockMs()-submittedAt;
         TraceFrame(visible?1:0); FlushFrameTrace();
         return;
     }
@@ -347,32 +370,44 @@ void AdvanceAnimation() {
         bool showing=IsWindowVisible(s.hwnd)!=FALSE;
         if(!RenderAnimation(s,value)||(!showing&&!PositionSurface(s,true))) { FailTransition(); return; }
     }
+    lastSubmitMs=ClockMs()-submittedAt;
     TraceFrame(value);
+    // One-shot high-resolution timer: fractional refresh periods do not drift
+    // to 16/32ms steps, and there is no timer once a transition finishes.
+    double after=ClockMs();
+    do { nextFrameAt+=frameIntervalMs; } while(nextFrameAt<=after);
+    LARGE_INTEGER due{};
+    due.QuadPart=-(LONGLONG)std::max(1.0,10000*std::min(nextFrameAt-after,transition.Remaining(after)));
+    if(!SetWaitableTimer(animationTick,&due,0,nullptr,nullptr,FALSE)) FailTransition();
 }
 void SetVisibility(bool visible,bool animate=true) {
     if(paused||params.opacity==0) visible=false;
-    uint64_t now=GetTickCount64();
+    double now=ClockMs();
     if(!animate||params.opacity==0) {
         if(visible==transition.Target()&&!transition.Running(now)) return;
         transition.Reset(visible); AdvanceAnimation(); return;
     }
+    if(visible==transition.Target()) return;
+    // Finish cold resource preparation BEFORE starting the clock. Keep only
+    // the OS-owned surface while hidden; CPU bitmap memory is already freed.
+    if(visible) for(auto& s:surfaces) if(!s.uploaded&&!Render(s,0)) { FailTransition(); return; }
+    now=ClockMs();
     if(!transition.Retarget(visible,now)) return;
     if(!animationTimerArmed) {
         // WM_TIMER is low priority and can be starved by Explorer/accessibility
         // traffic. A waitable timer is handled directly by the message loop.
         animationTick=CreateWaitableTimerExW(nullptr,nullptr,0x00000002,TIMER_ALL_ACCESS);
         if(!animationTick) animationTick=CreateWaitableTimerW(nullptr,FALSE,nullptr);
-        LARGE_INTEGER due{}; due.QuadPart=-160000;
-        animationTimerArmed=animationTick&&SetWaitableTimer(animationTick,&due,16,nullptr,nullptr,FALSE);
+        animationTimerArmed=animationTick!=nullptr;
         if(!animationTimerArmed) { transition.Reset(visible); AdvanceAnimation(); return; }
     }
+    nextFrameAt=now;
     AdvanceAnimation();
 }
-void UpdateFocus() {
-    TraceFocus("focus");
+void UpdateWindowState() {
+    TraceWindowState("windows");
     if(paused||!params.focusOnly) return;
-    auto kind=ClassifyForeground(GetForegroundWindow());
-    if(kind!=ForegroundKind::Transient) SetVisibility(kind==ForegroundKind::Application);
+    SetVisibility(HasApplicationWindow());
 }
 void QueueOnce(UINT message,bool& pending) {
     if(!pending) pending=PostMessageW(controller,message,0,0)!=FALSE;
@@ -382,19 +417,24 @@ bool Rebuild() {
     if(paused) { Status(L"暗角已暂停 · 可从托盘恢复"); return true; }
     if(!LocateDesktop()) { Status(L"未找到桌面宿主 · 已安全隐藏，将自动重试"); return false; }
     IconMask fresh;
-    if(!ReadIconMask(fresh)) { Status(L"无法读取桌面图标遮罩 · 未启用暗角"); return false; }
+    if(!params.darkenIcons&&!ReadIconMask(fresh)) { Status(L"无法读取桌面图标遮罩 · 未启用暗角"); return false; }
     iconMask=std::move(fresh); iconsDirty=false;
+    frameIntervalMs=1000.0/60;
+    detectedRefreshHz=0;
     std::vector<RECT> monitors; EnumDisplayMonitors(nullptr,nullptr,CollectMonitor,reinterpret_cast<LPARAM>(&monitors));
     if(monitors.empty()) { Status(L"没有可用显示器"); return false; }
     for(const RECT& r:monitors) {
         Surface s; s.rect=r;
         surfaces.push_back(std::move(s));
     }
-    bool visible=params.opacity>0&&(!params.focusOnly||ClassifyForeground(GetForegroundWindow())==ForegroundKind::Application);
-    TraceFocus("rebuild");
+    // Prewarm at apply/startup even when the desktop currently has focus. A
+    // later fully-hidden -> app transition has exactly the same path as a reversal.
+    if(params.opacity>0) for(auto& s:surfaces) if(!Render(s,0)) { FailTransition(); return false; }
+    bool visible=params.opacity>0&&(!params.focusOnly||HasApplicationWindow());
+    TraceWindowState("rebuild");
     SetVisibility(visible,params.focusOnly);
     if(!transition.Target()&&visible) return false;
-    Status(params.focusOnly?L"暗角已应用 · 随应用焦点自动舒展淡入淡出":L"暗角已应用 · 位于桌面上方、普通应用下方"); return true;
+    Status(params.focusOnly?L"暗角已应用 · 存在应用窗口时启用，全部收起后淡出":L"暗角已应用 · 位于桌面上方、普通应用下方"); return true;
 }
 void OpenSettings() {
     wchar_t exe[32768]; GetModuleFileNameW(nullptr,exe,32768);
@@ -428,11 +468,17 @@ LRESULT CALLBACK SurfaceProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
 }
 void CALLBACK DesktopEvent(HWINEVENTHOOK hook,DWORD event,HWND hwnd,LONG object,LONG,DWORD,DWORD) {
     if(event==EVENT_SYSTEM_FOREGROUND) {
-        QueueOnce(FocusMessage,focusPending);
+        QueueOnce(WindowStateMessage,windowStatePending);
         QueueOnce(ReorderMessage,reorderPending);
         return;
     }
     if(hwnd==iconList || hwnd==icons) { QueueOnce(IconMessage,iconPending); return; }
+    if(hook==windowHook||hook==cloakHook) {
+        if(object==OBJID_WINDOW&&(!IsWindow(hwnd)||GetAncestor(hwnd,GA_ROOT)==hwnd))
+            QueueOnce(WindowStateMessage,windowStatePending);
+        return;
+    }
+    if(hook==minimizeHook) QueueOnce(WindowStateMessage,windowStatePending);
     // The icon hook spans several object events. Ignore unrelated applications
     // here so animation/accessibility events cannot keep repositioning us.
     if(hook==iconHook) return;
@@ -449,9 +495,10 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     if(taskbarCreated && msg==taskbarCreated) { AddTray(); SetTimer(hwnd,2,1500,nullptr); return 0; }
     switch(msg) {
     case ReorderMessage: reorderPending=false; SetTimer(hwnd,3,60,nullptr); return 0;
-    case FocusMessage: focusPending=false; UpdateFocus(); return 0;
+    case WindowStateMessage: windowStatePending=false; UpdateWindowState(); return 0;
     case IconMessage:
         iconPending=false;
+        if(params.darkenIcons) return 0;
         iconsDirty=true;
         if(!paused&&(transition.Target()||animationTimerArmed)) SetTimer(hwnd,5,350,nullptr);
         return 0;
@@ -492,7 +539,7 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if(intact&&(transition.Target()||animationTimerArmed)) for(auto& s:surfaces) if(!IsWindow(s.hwnd)) { intact=false; break; }
             if(!intact) Rebuild();
             else {
-                UpdateFocus();
+                UpdateWindowState();
                 for(auto& s:surfaces) PositionSurface(s,true);
             }
         }
@@ -516,17 +563,17 @@ int SelfTest() {
     p.opacity=1; p.feather=.05; p.shape=.3; if(Alpha(p,0,0)!=1) return 4;
     p.cx=.2; p.cy=.8; if(Alpha(p,.2,.8)!=0) return 5;
     using namespace focus_animation;
-    if(Scale(1)!=1||Opacity(1)!=1||Opacity(0)!=0||Scale(0)<=1) return 6;
-    if(Opacity(.75)!=1||Opacity(.25)<=0||Opacity(.25)>=1) return 7;
+    if(Opacity(1)!=1||Opacity(0)!=0) return 6;
+    if(Opacity(.75)!=.75||Opacity(.25)!=.25) return 7;
     Transition animation; animation.Reset(false); animation.Retarget(true,1000);
-    if(animation.Value(1000)!=0||!animation.Running(1100)||animation.Running(1360)||animation.Value(1360)!=1) return 8;
-    if(!(animation.Value(1090)>.5&&animation.Value(1270)>.95)) return 9;
+    if(animation.Value(1000)!=0||!animation.Running(1100)||animation.Running(1420)||animation.Value(1420)!=1) return 8;
+    if(!(animation.Value(1020)>.08&&animation.Value(1020)<.10&&animation.Value(1210)==.75&&animation.Value(1400)>.995)) return 9;
     double partial=animation.Value(1120); animation.Retarget(false,1120);
     if(animation.Value(1120)!=partial||animation.Target()||animation.Value(2000)!=0) return 10;
     previous=0;
     for(int i=0;i<=100;i++) {
-        double value=i/100.0, opacity=Opacity(value), scale=Scale(value);
-        if(opacity<previous||opacity<0||opacity>1||scale<1||scale>1.45) return 11;
+        double value=i/100.0, opacity=Opacity(value);
+        if(opacity<previous||opacity<0||opacity>1) return 11;
         previous=opacity;
     }
     return 0;
@@ -571,23 +618,27 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     traceAnimation=wcsstr(args,L"--trace-animation")!=nullptr;
     if(traceAnimation) {
         FILE* file=_wfopen((configDir+L"\\animation-trace.csv").c_str(),L"w");
-        if(file) { std::fputs("tick,target,visibility,scale,opacity,windowVisible\n",file); std::fclose(file); }
+        if(file) { std::fputs("qpcMs,target,visibility,scale,opacity,windowVisible,submitMs\n",file); std::fclose(file); }
     }
     SetPriorityClass(GetCurrentProcess(),NORMAL_PRIORITY_CLASS);
     AddTray(); Load();
     foregroundHook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     minimizeHook=SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART,EVENT_SYSTEM_MINIMIZEEND,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+    windowHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_HIDE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+    cloakHook=SetWinEventHook(EVENT_OBJECT_CLOAKED,EVENT_OBJECT_UNCLOAKED,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     reorderHook=SetWinEventHook(EVENT_OBJECT_REORDER,EVENT_OBJECT_REORDER,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     iconHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_NAMECHANGE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
-    if(!foregroundHook&&params.focusOnly) {
-        Status(L"无法监听前台焦点 · 未启用暗角，请重新启动后台");
-    } else { Rebuild(); UpdateFocus(); }
+    if(!windowHook&&params.focusOnly) {
+        Status(L"无法监听应用窗口 · 未启用暗角，请重新启动后台");
+    } else { Rebuild(); UpdateWindowState(); }
     // Normal scheduling does not consume CPU while this thread is asleep. Idle
     // process priority starved focus notifications and animation under load.
     SetTimer(controller,1,10000,nullptr);
     while(DispatchWork()) { }
     if(foregroundHook) UnhookWinEvent(foregroundHook);
     if(minimizeHook) UnhookWinEvent(minimizeHook);
+    if(windowHook) UnhookWinEvent(windowHook);
+    if(cloakHook) UnhookWinEvent(cloakHook);
     if(reorderHook) UnhookWinEvent(reorderHook);
     if(iconHook) UnhookWinEvent(iconHook);
     Clear(); NOTIFYICONDATAW nid{sizeof(nid)}; nid.hWnd=controller; nid.uID=TrayId; Shell_NotifyIconW(NIM_DELETE,&nid);
