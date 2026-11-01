@@ -66,6 +66,9 @@ int main() {
         check(belowApps,"existing windows above desktop stay above both surfaces");
     };
     checkOrder();
+    unsigned placed=placementCalls;
+    for(int i=0;i<100;i++) { PositionSurface(first,true); PositionSurface(second,true); }
+    check(placementCalls==placed,"100 unchanged placement checks never restack live surfaces");
     capturingPreview=true; PositionSurface(first,true);
     check(!IsWindowVisible(first.hwnd),"preview suppression hides without destroying cache");
     capturingPreview=false;

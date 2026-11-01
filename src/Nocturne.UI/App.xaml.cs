@@ -20,7 +20,8 @@ public partial class App : Application
         instance = new Mutex(true, @"Local\VignFinder.Settings.v3", out bool first);
         if (!first)
         {
-            var hwnd = FindWindow(null, "Penumbra 半影");
+            var hwnd = FindWindow(null, "Penumbra");
+            if (hwnd == IntPtr.Zero) hwnd = FindWindow(null, "Penumbra 半影"); // An older settings build may still own the mutex.
             if (hwnd != IntPtr.Zero) { ShowWindow(hwnd, 9); SetForegroundWindow(hwnd); }
             Exit();
             return;

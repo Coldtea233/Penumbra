@@ -18,11 +18,13 @@
 #include <cstdint>
 #include <memory>
 #include "focus_animation.h"
+#include "desktop_blur.h"
+#include "branding.h"
 
 // Event-driven at rest. A short-lived timer exists only during a transition.
 constexpr UINT TrayMessage = WM_APP + 1, ReorderMessage = WM_APP + 2, IconMessage = WM_APP + 3, WindowStateMessage = WM_APP + 4, TrayId = 1;
 constexpr UINT SettingsId = 101, ReloadId = 102, PauseId = 103, ExitId = 104;
-struct Params { double opacity=.68, radius=.48, feather=.65, shape=1, cx=.5, cy=.5; int tint=0; bool primary=false, darkenIcons=false, focusOnly=false; };
+struct Params { double opacity=.68, radius=.48, feather=.65, shape=1, cx=.5, cy=.5, blurRadius=12; int tint=0; bool primary=false, darkenIcons=false, focusOnly=false, blurEnabled=false; };
 struct Bitmap {
     HDC dc{}; HBITMAP handle{}; HGDIOBJ previous{}; uint32_t* pixels{};
     int width=0, height=0;
@@ -54,15 +56,24 @@ HWND iconList{};
 HANDLE stopEvent{}, reloadEvent{}, appliedEvent{};
 HANDLE animationTick{};
 UINT taskbarCreated;
+branding::TrayIcon trayIcon;
 UINT previewMessage;
 HWINEVENTHOOK foregroundHook{}, minimizeHook{}, reorderHook{}, iconHook{}, windowHook{}, cloakHook{};
 std::vector<Surface> surfaces;
 Params params;
 bool paused=false, capturingPreview=false;
+bool blurPolicyAllowed=true;
 bool iconsDirty=false, animationTimerArmed=false;
 bool windowStatePending=false, reorderPending=false, iconPending=false;
 double frameIntervalMs=1000.0/60, detectedRefreshHz=0, nextFrameAt=0;
 focus_animation::Transition transition;
+struct BlurSurface { desktop_blur::Engine::Surface composition; RECT rect{}; };
+std::unique_ptr<desktop_blur::Engine> blurEngine;
+std::vector<BlurSurface> blurSurfaces;
+focus_animation::Transition blurTransition;
+HANDLE blurAnimationTick{};
+double blurNextFrameAt=0;
+bool blurTimerArmed=false;
 // Opt-in diagnostics only. Keep samples in memory during the animation and
 // write once at rest, so tracing cannot stall each frame with disk I/O.
 bool traceAnimation=false, traceFileOutput=true;
@@ -139,6 +150,8 @@ void Load() {
     params.tint=(int)ReadNumber(L"tint",0,0,2); params.primary=ReadNumber(L"primaryOnly",0,0,1)==1;
     params.darkenIcons=ReadNumber(L"darkenIcons",0,0,1)==1;
     params.focusOnly=ReadNumber(L"focusOnly",0,0,1)==1;
+    params.blurEnabled=ReadNumber(L"blurEnabled",0,0,1)==1;
+    params.blurRadius=ReadNumber(L"blurRadius",12,0,48);
     // This user-selected effect must not silently disappear when Windows'
     // unrelated client-area animations are disabled. Never change that setting.
 }
@@ -152,7 +165,7 @@ ForegroundKind ClassifyForeground(HWND foreground) {
     if(wcscmp(name,L"Progman")==0||wcscmp(name,L"WorkerW")==0) return ForegroundKind::Desktop;
     for(const auto* transient:{L"Shell_TrayWnd",L"Shell_SecondaryTrayWnd",L"NotifyIconOverflowWindow",
         L"TopLevelWindowForOverflowXamlIsland",L"XamlExplorerHostIslandWindow",L"#32768",
-        L"MultitaskingViewFrame",L"TaskListThumbnailWnd",L"Nocturne.Controller",L"Nocturne.Surface"})
+        L"MultitaskingViewFrame",L"TaskListThumbnailWnd",L"Nocturne.Controller",L"Nocturne.Surface",L"Nocturne.BlurSurface"})
         if(wcscmp(name,transient)==0) return ForegroundKind::Transient;
     DWORD pid=0; GetWindowThreadProcessId(root,&pid);
     HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
@@ -256,26 +269,111 @@ void StopAnimation() {
     if(animationTick) { CancelWaitableTimer(animationTick); CloseHandle(animationTick); animationTick=nullptr; }
     animationTimerArmed=false;
 }
-void Clear() { StopAnimation(); FlushFrameTrace(); for(auto& s:surfaces) DropSurface(s); surfaces.clear(); }
+void StopBlurAnimation() {
+    if(blurAnimationTick) { CancelWaitableTimer(blurAnimationTick); CloseHandle(blurAnimationTick); blurAnimationTick=nullptr; }
+    blurTimerArmed=false;
+}
+void ClearBlur() {
+    StopBlurAnimation(); blurTransition.Reset(false);
+    for(auto& s:blurSurfaces) s.composition.Reset();
+    blurSurfaces.clear();
+}
+void Clear() { StopAnimation(); ClearBlur(); FlushFrameTrace(); for(auto& s:surfaces) DropSurface(s); surfaces.clear(); }
+bool DesktopPlacementCurrent(HWND window,const RECT& rect) {
+    if(!IsWindowVisible(window)||GetWindow(window,GW_OWNER)!=desktop||
+       (GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOPMOST)) return false;
+    RECT actual{};
+    if(!GetWindowRect(window,&actual)||!EqualRect(&actual,&rect)) return false;
+    // Do not restack a live backdrop just because a timer or foreground event
+    // arrived. Changing its DWM sampling boundary can invalidate the backdrop
+    // even when the requested coordinates and order did not actually change.
+    for(HWND below=GetWindow(window,GW_HWNDNEXT);below;below=GetWindow(below,GW_HWNDNEXT)) {
+        if(below==desktop) return true;
+        if(IsApplicationWindow(below)) return false;
+    }
+    return false;
+}
+bool PlaceDesktopPopup(HWND window,const RECT& rect,bool visible) {
+    if(!visible) { if(IsWindowVisible(window)) ShowWindow(window,SW_HIDE); return true; }
+    if(!IsWindow(window)||!IsWindow(desktop)) return false;
+    if(DesktopPlacementCurrent(window,rect)) return true;
+    if(GetWindow(window,GW_OWNER)!=desktop) {
+        SetLastError(ERROR_SUCCESS);
+        if(!SetWindowLongPtrW(window,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(desktop))&&GetLastError()!=ERROR_SUCCESS) return false;
+    }
+    return SetWindowPos(window,HWND_BOTTOM,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,
+        SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_SHOWWINDOW)!=FALSE;
+}
 bool PositionSurface(Surface& s, bool show) {
     if(!s.hwnd) return true;
-    if(!show || paused || capturingPreview || (!transition.Target() && !animationTimerArmed)) { ShowWindow(s.hwnd,SW_HIDE); return true; }
-    if(!IsWindow(desktop)) return false;
     // A foreign insert-after HWND can belong to an elevated tool (e.g. PixPin),
     // making SetWindowPos fail with ERROR_ACCESS_DENIED. Own our popup by the
     // desktop instead: Windows keeps owned windows above their owner, so
     // HWND_BOTTOM puts us just above the desktop and below ordinary apps.
     // Only change OUR window; never reposition Explorer or a foreign app.
-    if(GetWindow(s.hwnd,GW_OWNER)!=desktop) {
-        SetLastError(ERROR_SUCCESS);
-        if(!SetWindowLongPtrW(s.hwnd,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(desktop))&&GetLastError()!=ERROR_SUCCESS)
-            return false;
-    }
     // HWND_BOTTOM also clears an accidental topmost flag. Do not move or
     // activate the owner, and do not promote the overlay to HWND_TOP on failure.
-    return SetWindowPos(s.hwnd,HWND_BOTTOM,s.rect.left,s.rect.top,
-        s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,
-        SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_SHOWWINDOW)!=FALSE;
+    return PlaceDesktopPopup(s.hwnd,s.rect,show&&!paused&&!capturingPreview&&(transition.Target()||animationTimerArmed));
+}
+bool PositionBlurSurfaces() {
+    for(auto& s:blurSurfaces) {
+        HWND window=s.composition.hwnd;
+        // Reinsert LAST at the bottom: blur stays below our vignette and above
+        // its desktop owner, never above ordinary apps. No foreign HWND anchor.
+        if(!PlaceDesktopPopup(window,s.rect,!paused&&!capturingPreview&&(blurTransition.Target()||blurTimerArmed))) return false;
+    }
+    return true;
+}
+void FailBlur() {
+    ClearBlur();
+    Status(L"桌面模糊不可用 · 已安全关闭模糊，暗角不受影响");
+}
+void RefreshBlurPolicy(HWND hwnd) {
+    if(!params.blurEnabled) return;
+    bool allowed=desktop_blur::TransparencyAllowed();
+    if(allowed==blurPolicyAllowed) return;
+    blurPolicyAllowed=allowed;
+    if(!allowed) FailBlur();
+    else SetTimer(hwnd,2,250,nullptr);
+}
+void AdvanceBlurAnimation() {
+    double now=ClockMs();
+    bool running=blurTransition.Running(now);
+    double value=running?blurTransition.Value(now):(blurTransition.Target()?1:0);
+    for(auto& s:blurSurfaces) if(FAILED(s.composition.visual->put_Opacity(static_cast<float>(value)))) { FailBlur(); return; }
+    if(!running) {
+        blurTransition.Reset(blurTransition.Target()); StopBlurAnimation();
+        if(!PositionBlurSurfaces()) FailBlur();
+        return;
+    }
+    // Only a short transition submits properties. No screenshots, CPU blur or
+    // continuous property/timer updates after the endpoint has been submitted.
+    do { blurNextFrameAt+=frameIntervalMs; } while(blurNextFrameAt<=now);
+    LARGE_INTEGER due{};
+    due.QuadPart=-(LONGLONG)std::max(1.0,10000*std::min(blurNextFrameAt-now,blurTransition.Remaining(now)));
+    if(!SetWaitableTimer(blurAnimationTick,&due,0,nullptr,nullptr,FALSE)) FailBlur();
+}
+void SetBlurVisibility(bool visible) {
+    visible=visible&&params.blurEnabled&&!paused;
+    if(blurSurfaces.empty()||visible==blurTransition.Target()) return;
+    double now=ClockMs();
+    if(!blurTransition.Retarget(visible,now)) return;
+    if(!blurTimerArmed) {
+        blurAnimationTick=CreateWaitableTimerExW(nullptr,nullptr,0x00000002,TIMER_ALL_ACCESS);
+        if(!blurAnimationTick) blurAnimationTick=CreateWaitableTimerW(nullptr,FALSE,nullptr);
+        blurTimerArmed=blurAnimationTick!=nullptr;
+        if(!blurTimerArmed) { FailBlur(); return; }
+    }
+    // Commit the current opacity before unhiding, including cold starts and
+    // rapid reversals; a previously opaque surface can never flash on screen.
+    for(auto& s:blurSurfaces) if(FAILED(s.composition.visual->put_Opacity(static_cast<float>(blurTransition.Value(now))))) { FailBlur(); return; }
+    if(!PositionBlurSurfaces()) { FailBlur(); return; }
+    blurNextFrameAt=now;
+    AdvanceBlurAnimation();
+}
+bool WantsDesktopBlur(bool enabled,bool isPaused,bool hasWindows,ForegroundKind kind,bool previousTarget=false) {
+    return enabled&&!isPaused&&hasWindows&&
+        (kind==ForegroundKind::Application||(kind==ForegroundKind::Transient&&previousTarget));
 }
 BOOL CALLBACK CollectMonitor(HMONITOR monitor,HDC,LPRECT,LPARAM data) {
     MONITORINFOEXW info{}; info.cbSize=sizeof(info);
@@ -408,15 +506,21 @@ void SetVisibility(bool visible,bool animate=true) {
 }
 void UpdateWindowState() {
     TraceWindowState("windows");
-    if(paused||!params.focusOnly) return;
-    SetVisibility(HasApplicationWindow());
+    if(paused) return;
+    if(!params.focusOnly&&!params.blurEnabled) return;
+    bool hasWindows=HasApplicationWindow();
+    if(params.focusOnly) SetVisibility(hasWindows);
+    HWND foreground=GetForegroundWindow();
+    ForegroundKind kind=ClassifyForeground(foreground);
+    if(kind==ForegroundKind::Application&&!IsApplicationWindow(GetAncestor(foreground,GA_ROOT))) kind=ForegroundKind::Transient;
+    SetBlurVisibility(WantsDesktopBlur(params.blurEnabled,paused,hasWindows,kind,blurTransition.Target()));
 }
 void QueueOnce(UINT message,bool& pending) {
     if(!pending) pending=PostMessageW(controller,message,0,0)!=FALSE;
 }
 bool Rebuild() {
     Clear(); transition.Reset(false);
-    if(paused) { Status(L"暗角已暂停 · 可从托盘恢复"); return true; }
+    if(paused) { Status(L"桌面效果已暂停 · 可从托盘恢复"); return true; }
     if(!LocateDesktop()) { Status(L"未找到桌面宿主 · 已安全隐藏，将自动重试"); return false; }
     IconMask fresh;
     if(!params.darkenIcons&&!ReadIconMask(fresh)) { Status(L"无法读取桌面图标遮罩 · 未启用暗角"); return false; }
@@ -436,7 +540,34 @@ bool Rebuild() {
     TraceWindowState("rebuild");
     SetVisibility(visible,params.focusOnly);
     if(!transition.Target()&&visible) return false;
-    Status(params.focusOnly?L"暗角已应用 · 存在应用窗口时启用，全部收起后淡出":L"暗角已应用 · 位于桌面上方、普通应用下方"); return true;
+    std::wstring message=params.focusOnly?L"暗角已应用 · 存在应用窗口时启用":L"暗角已应用";
+    if(params.blurEnabled) {
+        blurPolicyAllowed=desktop_blur::TransparencyAllowed();
+        if(!blurEngine) blurEngine=std::make_unique<desktop_blur::Engine>();
+        HRESULT hr=S_OK;
+        for(const RECT& r:monitors) {
+            BlurSurface s; s.rect=r;
+            // Layered+transparent makes input pass through across process
+            // boundaries, not just to windows on our own UI thread.
+            s.composition.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,
+                L"Nocturne.BlurSurface",L"Penumbra desktop blur",WS_POPUP,r.left,r.top,r.right-r.left,r.bottom-r.top,desktop,nullptr,instance,nullptr);
+            if(!s.composition.hwnd) hr=HRESULT_FROM_WIN32(GetLastError());
+            else if(!SetLayeredWindowAttributes(s.composition.hwnd,0,255,LWA_ALPHA)) hr=HRESULT_FROM_WIN32(GetLastError());
+            else hr=blurEngine->Attach(s.composition.hwnd,r.right-r.left,r.bottom-r.top,static_cast<float>(params.blurRadius),s.composition);
+            if(FAILED(hr)) { s.composition.Reset(); ClearBlur(); break; }
+            blurSurfaces.push_back(std::move(s));
+        }
+        if(FAILED(hr)) {
+            wchar_t error[100]; swprintf(error,100,L" · 模糊不可用（0x%08lX），暗角保留",static_cast<unsigned long>(hr));
+            message+=error;
+        } else {
+            UpdateWindowState();
+            wchar_t appliedRadius[96];
+            swprintf(appliedRadius,96,L" · 模糊附加半径 %.0f px · 应用获焦时模糊，点击桌面恢复清晰",params.blurRadius);
+            message+=appliedRadius;
+        }
+    }
+    Status(message.c_str()); return true;
 }
 void OpenSettings() {
     wchar_t exe[32768]; GetModuleFileNameW(nullptr,exe,32768);
@@ -445,15 +576,12 @@ void OpenSettings() {
         MessageBoxW(nullptr,L"无法打开设置。请保持 Penumbra.exe 与原生程序位于同一文件夹。",L"Penumbra 半影",MB_OK|MB_ICONERROR);
 }
 void AddTray() {
-    NOTIFYICONDATAW nid{sizeof(nid)}; nid.hWnd=controller; nid.uID=TrayId;
-    nid.uFlags=NIF_ICON|NIF_MESSAGE|NIF_TIP; nid.uCallbackMessage=TrayMessage;
-    nid.hIcon=LoadIconW(nullptr,IDI_APPLICATION); lstrcpyW(nid.szTip,L"Penumbra · 半影"); Shell_NotifyIconW(NIM_ADD,&nid);
-    nid.uVersion=NOTIFYICON_VERSION_4; Shell_NotifyIconW(NIM_SETVERSION,&nid);
+    trayIcon.Update(instance,controller,TrayId,TrayMessage,true);
 }
 void Menu() {
     HMENU menu=CreatePopupMenu(); AppendMenuW(menu,MF_STRING,SettingsId,L"打开设置");
-    AppendMenuW(menu,MF_STRING,ReloadId,L"重新挂接桌面"); AppendMenuW(menu,MF_STRING,PauseId,paused?L"恢复暗角":L"暂停暗角");
-    AppendMenuW(menu,MF_SEPARATOR,0,nullptr); AppendMenuW(menu,MF_STRING,ExitId,L"退出暗角");
+    AppendMenuW(menu,MF_STRING,ReloadId,L"重新挂接桌面"); AppendMenuW(menu,MF_STRING,PauseId,paused?L"恢复桌面效果":L"暂停桌面效果");
+    AppendMenuW(menu,MF_SEPARATOR,0,nullptr); AppendMenuW(menu,MF_STRING,ExitId,L"退出并恢复桌面");
     POINT p; GetCursorPos(&p); SetForegroundWindow(controller);
     UINT command=TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,controller,nullptr); DestroyMenu(menu);
     if(command==SettingsId) OpenSettings();
@@ -492,6 +620,7 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         capturingPreview=wp!=0;
         if(capturingPreview) SetTimer(hwnd,4,3000,nullptr); else KillTimer(hwnd,4);
         for(auto& s:surfaces) PositionSurface(s,true);
+        PositionBlurSurfaces();
         return 1;
     }
     if(taskbarCreated && msg==taskbarCreated) { AddTray(); SetTimer(hwnd,2,1500,nullptr); return 0; }
@@ -510,14 +639,31 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         return 0;
     case WM_DISPLAYCHANGE: SetTimer(hwnd,2,700,nullptr); return 0;
     case WM_SETTINGCHANGE:
+        trayIcon.Update(instance,controller,TrayId,TrayMessage);
         // Theme, animation preference and unrelated app broadcasts do not
         // change our mask. Rebuilding for all of them cancelled live fades.
         if(wp==SPI_SETWORKAREA||wp==SPI_SETICONMETRICS) SetTimer(hwnd,2,700,nullptr);
+        if(params.blurEnabled&&(wp==SPI_SETHIGHCONTRAST||(lp&&wcscmp(reinterpret_cast<const wchar_t*>(lp),L"ImmersiveColorSet")==0))) {
+            RefreshBlurPolicy(hwnd);
+        }
+        return 0;
+    case WM_DWMCOMPOSITIONCHANGED:
+        // Keep a valid surface until recovery actually runs. Do not introduce
+        // a guaranteed clear frame before a delayed rebuild.
+        if(params.blurEnabled) SetTimer(hwnd,2,250,nullptr);
+        return 0;
+    case WM_THEMECHANGED:
+        trayIcon.Update(instance,controller,TrayId,TrayMessage);
+        RefreshBlurPolicy(hwnd);
+        return 0;
+    case WM_DPICHANGED:
+        trayIcon.Update(instance,controller,TrayId,TrayMessage);
         return 0;
     case WM_TIMER:
         if(wp==4) {
             KillTimer(hwnd,4); capturingPreview=false;
             for(auto& s:surfaces) PositionSurface(s,true);
+            PositionBlurSurfaces();
         }
         else if(wp==5) {
             KillTimer(hwnd,5);
@@ -541,15 +687,18 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             // Hidden surfaces are cached too. Retry a failed/destroyed surface
             // even when FailTransition reset the visibility target to false.
             if(intact&&params.opacity>0) for(auto& s:surfaces) if(!IsWindow(s.hwnd)) { intact=false; break; }
+            if(intact) for(auto& s:blurSurfaces) if(!IsWindow(s.composition.hwnd)) { intact=false; break; }
             if(!intact) Rebuild();
             else {
                 UpdateWindowState();
                 for(auto& s:surfaces) PositionSurface(s,true);
+                PositionBlurSurfaces();
             }
         }
         else if(wp==3) {
             KillTimer(hwnd,3);
             for(auto& s:surfaces) PositionSurface(s, true);
+            PositionBlurSurfaces();
         }
         return 0;
     case WM_QUERYENDSESSION: return TRUE;
@@ -590,12 +739,15 @@ int SelfTest() {
     return 0;
 }
 bool DispatchWork(DWORD timeout=INFINITE) {
-    HANDLE events[]{stopEvent,reloadEvent,animationTick};
-    DWORD count=animationTimerArmed?3:2;
+    HANDLE events[4]{stopEvent,reloadEvent};
+    DWORD count=2,darkIndex=MAXDWORD,blurIndex=MAXDWORD;
+    if(animationTimerArmed) { darkIndex=count; events[count++]=animationTick; }
+    if(blurTimerArmed) { blurIndex=count; events[count++]=blurAnimationTick; }
     DWORD wait=MsgWaitForMultipleObjectsEx(count,events,timeout,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
     if(wait==WAIT_OBJECT_0||wait==WAIT_FAILED) return false;
     if(wait==WAIT_OBJECT_0+1) { paused=false; Load(); Rebuild(); }
-    if(animationTimerArmed&&wait==WAIT_OBJECT_0+2) AdvanceAnimation();
+    if(darkIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+darkIndex) AdvanceAnimation();
+    if(blurIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+blurIndex) AdvanceBlurAnimation();
     if(wait==WAIT_OBJECT_0+count) {
         MSG msg; unsigned messages=0;
         while(messages++<32&&PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
@@ -620,7 +772,8 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     reloadEvent=CreateEventW(nullptr,FALSE,FALSE,L"Local\\Nocturne.Reload.v1");
     appliedEvent=CreateEventW(nullptr,FALSE,FALSE,L"Local\\Nocturne.Applied.v1");
     if(!stopEvent||!reloadEvent||!appliedEvent) { CloseHandle(mutex); return 4; }
-    WNDCLASSW wc{}; wc.hInstance=app; wc.lpfnWndProc=SurfaceProc; wc.lpszClassName=L"Nocturne.Surface"; RegisterClassW(&wc);
+    WNDCLASSW wc{}; wc.hInstance=app; wc.hIcon=LoadIconW(app,MAKEINTRESOURCEW(branding::AppIcon)); wc.lpfnWndProc=SurfaceProc; wc.lpszClassName=L"Nocturne.Surface"; RegisterClassW(&wc);
+    wc.lpszClassName=L"Nocturne.BlurSurface"; RegisterClassW(&wc);
     wc.lpfnWndProc=ControllerProc; wc.lpszClassName=L"Nocturne.Controller"; RegisterClassW(&wc);
     controller=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,wc.lpszClassName,L"Nocturne Controller",WS_POPUP,0,0,0,0,nullptr,nullptr,app,nullptr);
     if(!controller) { Status(L"无法创建后台控制窗口"); return 5; }
@@ -639,7 +792,11 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     cloakHook=SetWinEventHook(EVENT_OBJECT_CLOAKED,EVENT_OBJECT_UNCLOAKED,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     reorderHook=SetWinEventHook(EVENT_OBJECT_REORDER,EVENT_OBJECT_REORDER,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     iconHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_NAMECHANGE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
-    if(!windowHook&&params.focusOnly) {
+    if((!windowHook||!foregroundHook)&&params.blurEnabled) {
+        params.blurEnabled=false;
+        Rebuild();
+        Status(L"窗口事件监听失败 · 已关闭自动模糊，暗角保留");
+    } else if(!windowHook&&params.focusOnly) {
         Status(L"无法监听应用窗口 · 未启用暗角，请重新启动后台");
     } else { Rebuild(); UpdateWindowState(); }
     // Normal scheduling does not consume CPU while this thread is asleep. Idle
@@ -652,6 +809,6 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     if(cloakHook) UnhookWinEvent(cloakHook);
     if(reorderHook) UnhookWinEvent(reorderHook);
     if(iconHook) UnhookWinEvent(iconHook);
-    Clear(); NOTIFYICONDATAW nid{sizeof(nid)}; nid.hWnd=controller; nid.uID=TrayId; Shell_NotifyIconW(NIM_DELETE,&nid);
+    Clear(); blurEngine.reset(); trayIcon.Reset();
     DestroyWindow(controller); CloseHandle(stopEvent); CloseHandle(reloadEvent); CloseHandle(appliedEvent); CloseHandle(mutex); return 0;
 }

@@ -1,38 +1,85 @@
-# Penumbra 半影 · Beta 0.3 r1
+<div align=center>
+  <img src="https://github.com/user-attachments/assets/a5613c30-cba4-4c74-8d25-5122be13e780" width=100 />
+<h1>Penumbra · 半影</h1>
 
-Windows x64 桌面暗角工具。设置界面使用 WinUI 3 / Windows App SDK，常驻后台为独立 C++ Win32 程序。构建目标为 Windows 10 2004（19041）及以上；本机验证结果见 TEST-REPORT.md。
+**为你的桌面添加暗角与模糊，将专注留给前台窗口**
 
-## 使用
+沉浸 · 自然 · 聚焦
 
-1. 安装版：先保存需要保留的参数，关闭旧版设置窗口并从托盘退出后台，双击 `Penumbra-Beta-0.3-r1-Setup-x64.msi`，从开始菜单打开。默认安装到当前用户的 `%LOCALAPPDATA%\Programs\Penumbra`，无需管理员权限；MSI 内部版本为 0.3.1，使用新的 ProductCode 并识别旧 0.3.0 安装。便携版：完整解压 ZIP，运行顶层 `Penumbra.exe`，必须保留旁边的 `app` 文件夹；“关于”显示 Beta 0.3 r1。
-2. 打开设置时会自动在后台刷新主屏预览；也可点击“刷新壁纸”。Wallpaper Engine 动态壁纸取当前一帧，不最小化应用或切换前台窗口。
-3. 调整强度、中心半径、羽化、长宽比、中心位置、色调和屏幕范围，左侧预览随参数变化更新；点击“应用到桌面”会再刷新一次壁纸并应用当前参数。色调选项为碳黑、墨蓝、暖黑。
-4. 关闭设置窗口后，由原生后台保留效果；托盘提供打开设置、暂停、重新挂接及退出。
-5. “恢复桌面”退出后台。图标默认不受暗角影响；勾选“压暗桌面图标”可让暗角同时覆盖图标。登录启动需主动开启，并点击应用保存；默认不开启。
+[下载](https://github.com/Coldtea233/Penumbra/releases) ·
+[反馈问题](https://github.com/Coldtea233/Penumbra/issues)
 
-强度 0% 为透明；半径与中心使用每屏归一化坐标。所有屏幕模式为每屏独立暗角。预览只显示主屏快照，壁纸切换后需重新读取。
+<div align=left>
 
-## 按应用窗口自动切换（可选）
+- **优秀的性能**：约30MB内存占用 0.02% CPU占用
+- **仅在必要时生效**：仅在前台存在窗口时启用 暗角/模糊 效果（可开关）
+- **非线性动画**：暗角切入/切出动画使用720 毫秒强缓出曲线
+- **原生UI**：设置界面采用Windows原生WinUI3设计语言
 
-开启右侧“仅有应用窗口时启用暗角”，点击“应用到桌面”后生效。此项默认关闭；沿用 INI 的 `focusOnly` 键以保留原有勾选状态，但不再由焦点控制。
+## Beta 0.4 下载与安装
 
-- 当前桌面有可见且未最小化的普通应用窗口（包括资源管理器文件窗口、Penumbra 设置窗口）：启用暗角。点击桌面或在应用之间切换不再触发淡出。
-- 所有应用最小化、关闭或隐藏后：平滑淡出。后台进程、其他虚拟桌面上被系统隐藏的窗口、工具浮层、任务栏和桌面宿主不计入。
-- 完整过渡约 720 毫秒，使用 `cubic-bezier(0.16, 1, 0.30, 1)` 强缓出：前 100 毫秒完成约 62% 的变化，随后持续减速，终点速度为零；中途反向从当前透明度衔接。即使 Windows 动画效果关闭也会播放，不修改系统设置。Beta 0.3 r1 包含此调整；旧 Beta 0.3 使用 420 毫秒二次缓出。
-- 不再逐帧缩放全屏位图，而是复用系统保存的蒙版，只更新合成透明度；图标透明孔保持固定位置。此取舍减弱了放大退场效果，以降低动画卡顿和 CPU 开销。左侧预览仍展示最终参数效果。
+双击发行附件 `Penumbra-Beta-0.4-Setup-x64.exe`，或下载便携 ZIP 后完整解压。安装前请保存参数、关闭设置并从托盘退出后台。当前用户安装，无需管理员权限；内部使用 Windows Installer 保留旧版升级、回滚与系统卸载能力。安装包未签名，可能出现 SmartScreen 提示。
 
-窗口显示、隐藏、创建、销毁、最小化及虚拟桌面隐藏事件触发合并后的窗口检查，不用高频轮询。动画使用 QPC 高精度时间和按屏幕刷新率安排的一次性计时器；图标遮罩更新避开动画期间。动画结束后关闭定时器，不保留 CPU 帧位图；隐藏时保留系统已提交表面，避免下次出现时重新生成整屏蒙版。暂停、退出、恢复桌面或重建时释放表面。静止时阻塞休眠，只有原来的 10 秒恢复检查，不保留 Direct3D 设备或持续捕获壁纸。
+本次包含桌面模糊与半径修订、托盘切换稳定性改进、软件/黑白托盘图标和“关于”信息卡。只发布已验证的 Beta 0.4，不包含 Beta 0.5 实验改动。半径 0 仍有系统基础模糊，关闭模糊开关才完全清晰；实时模糊需要 Windows 11。
 
-首次启动或应用新参数会一次性生成蒙版，准备完毕后才开始计时；后续从完全隐藏状态显示时复用同一表面。实际显示流畅性仍受系统合成器及机器负载影响，提交帧间隔不等于物理屏幕帧率。
+详细参数、兼容限制、资源占用与构建步骤见 [使用指南](USER-GUIDE.md)，测试边界见 [验证记录](TEST-REPORT.md)。
 
-预览框外右下角显示“Wallpaper Engine 活动状态”：检测到当前登录会话的 `wallpaper32.exe` 或 `wallpaper64.exe` 时为绿点，未检测到或无法读取时为灰点。悬停可查看文字状态。打开设置、重新激活窗口或刷新壁纸时检测；设置窗口可见且未最小化时每 5 秒更新，关闭窗口后不再检测。此状态仅表示进程是否运行，不代表动态壁纸正在播放或桌面暗角已经应用成功。
+## 效果预览
 
-宽窗口在左侧登录启动开关下方显示“关于”；窄窗口在全部参数之后、滚动内容最底部显示。包含圆形作者头像、冷茶Reicha、当前版本 Beta 0.3 r1，以及白色的 bilibili / GitHub 图标链接，无需打开弹窗。头像来自作者提供的本地图片，不联网读取。点击图标后在默认浏览器中打开作者主页，不内嵌网页，也不会在启动时请求这些网站。应用显示名称已从 VignFinder 取景器更改为 Penumbra 半影；继续沿用原配置目录和后台文件名，保留用户设置。
+亮色主题
+
+<p align="center">
+  <img src="img/light_1.png" alt="亮色主题预览 1" width="22%" />
+  <img src="img/light_2.png" alt="亮色主题预览 2" width="22%" />
+  <img src="img/light_3.png" alt="亮色主题预览 3" width="22%" />
+  <img src="img/light_4.png" alt="亮色主题预览 4" width="22%" />
+</p>
+
+暗色主题
+
+<p align="center">
+  <img src="img/night_1.png" alt="暗色主题预览 1" width="22%" />
+  <img src="img/night_2.png" alt="暗色主题预览 2" width="22%" />
+  <img src="img/night_3.png" alt="暗色主题预览 3" width="22%" />
+  <img src="img/night_4.png" alt="暗色主题预览 4" width="22%" />
+</p>
+
+## 性能报告
+
+以下数值来自历史暗角路径测试，不代表开启 Beta 0.4 实时模糊后的整机成本。动态模糊还消耗 DWM/GPU 与系统合成内存，具体已测范围见验证记录。
+
+- **测试平台**：i5-12500H (2.50 GHz) / RTX 3050 Laptop（4GB VRAM）/ RAM：16GB / 2880×1620、120 Hz
+- **性能表现**: 后台静止：整机 CPU 约 0.02%，工作集约 28.5 MiB，私有内存约 1.6 MiB。
+- 连续 24 次动画：整机 CPU 平均约 0.24%，平均帧提交耗时 0.46 毫秒；提交间隔 P95 为 10.8 毫秒，不等同实际屏幕帧率。
+- WinUI 设置窗口另占约 119 MiB 私有内存，关闭界面即可释放。
+
+后台不加载 .NET、WinUI 或 WebView2；开启模糊后使用系统 Composition 图形资源。静止时无应用侧逐帧绘制、持续壁纸抓取或忙循环。
+参数、屏幕布局或图标遮罩变化时生成完整分辨率的预乘 BGRA 位图，通过 `UpdateLayeredWindow` 提交后释放临时 CPU 位图和 GDI 资源。
+图标遮罩常驻缓存每像素 1 位；2880×1620 约 0.56 MiB。读取图标和提交表面时有临时位图成本。
+动画期间不分配全屏 CPU 帧或纹理，不逐帧缩放与重新上传位图；只更改已提交表面的常量透明度。系统表面在隐藏时仍缓存，代价是系统合成内存不降到销毁窗口时的水平；退出、暂停、恢复桌面和重建时释放。
+前景、最小化及桌面层级事件触发合并后的层级调整；每 10 秒执行一次恢复检查，静止时不重绘。其他应用的普通对象事件会被过滤。
+Windows 合成器另持有每屏透明表面；3840×2160 的 32 位表面约 31.6 MiB，不能用后台私有内存代表全部成本。
+发行包含自包含 UI 运行库，磁盘大小与常驻内存是两回事。关闭设置窗口可释放 UI 进程。
+
+## 构建
+
+需要 .NET 8 SDK、可访问 NuGet 的网络、Windows x64 和 llvm-mingw UCRT x64 工具链。本次使用 20261020 版 llvm-mingw。
+
+```powershell
+./build.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
+# 生成内部 Windows Installer 载荷，再打包为对外发布的 EXE
+./installer/build-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
+./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-Beta-0.4/Penumbra-Beta-0.4-Setup-x64.msi' -OutputDirectory './dist/release-Beta-0.4' -IconPath './assets/branding/AppIcon.ico'
+# 原生动画、图标保护、快速反向和资源释放测试，不操作现有应用窗口
+./tests/run.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
+```
+
+程序产物为 `dist\Penumbra-Beta-0.4` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-Beta-0.4\Penumbra-Beta-0.4-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
 
 ## 发行目录
 
 ```text
-Penumbra-Beta-0.3-r1/
+Penumbra-Beta-0.4/
   Penumbra.exe   启动入口（启动界面后立即退出，不常驻）
   README.md      使用说明
   app/           程序本体、后台、全部 DLL、语言和头像资源
@@ -55,21 +102,12 @@ Penumbra-Beta-0.3-r1/
 
 ## 桌面效果
 
-原先挂在 Explorer 内的分层子窗口，在本机 Wallpaper Engine 下没有显示。当前版本使用非置顶、点击穿透的顶层透明窗口，由桌面宿主作为 owner（不是 Explorer 子窗口），通过 Windows 的所有者层级约束放在桌面上方、普通应用下方。不再借用紧邻桌面的第三方窗口作为层级参照，避免管理员权限运行的 PixPin 等工具使定位失败；只调整本软件窗口，不修改其他应用的权限或层级。Beta 0.3 r1 包含此修复，旧版安装包保留不变。
+原先挂在 Explorer 内的分层子窗口，在本机 Wallpaper Engine 下没有显示。本版改为由桌面宿主拥有、非置顶、点击穿透的顶层透明窗口，并把它放在桌面上方、普通应用下方。
 
 这类窗口也处于图标上方，因此本版从 Explorer 单独读取图标与文字的绘制结果，按实际像素生成透明遮罩，让图标保留亮度，避免整块矩形区域露出明亮壁纸。图标创建、移动、重命名、选择等事件经过 350 毫秒合并后更新遮罩；结果相同则不重绘。预览也使用图标遮罩。
 
 每次应用会先请求旧后台正常退出，再启动同目录新版，避免旧程序继续处理新版设置。
 
-## 资源占用
-
-- 后台不加载 .NET、WinUI、WebView2 或 Direct3D，静止时无逐帧绘制、持续壁纸抓取或忙循环。
-- 参数、屏幕布局或图标遮罩变化时生成完整分辨率的预乘 BGRA 位图，通过 `UpdateLayeredWindow` 提交后释放临时 CPU 位图和 GDI 资源。
-- 图标遮罩常驻缓存每像素 1 位；2880×1620 约 0.56 MiB。读取图标和提交表面时有临时位图成本。
-- 动画期间不分配全屏 CPU 帧或纹理，不逐帧缩放与重新上传位图；只更改已提交表面的常量透明度。系统表面在隐藏时仍缓存，代价是系统合成内存不降到销毁窗口时的水平；退出、暂停、恢复桌面和重建时释放。
-- 前景、最小化及桌面层级事件触发合并后的层级调整；每 10 秒执行一次恢复检查，静止时不重绘。其他应用的普通对象事件会被过滤。
-- Windows 合成器另持有每屏透明表面；3840×2160 的 32 位表面约 31.6 MiB，不能用后台私有内存代表全部成本。
-- 发行包含自包含 UI 运行库，磁盘大小与常驻内存是两回事。关闭设置窗口可释放 UI 进程。
 
 ## 兼容范围
 
@@ -84,17 +122,4 @@ Penumbra-Beta-0.3-r1/
 程序不会主动联网、不修改壁纸文件；只有主动点击作者主页链接才会交给浏览器打开。桌面预览在打开设置、点击刷新或应用时读取，包含图标，只保留在设置进程内存。捕获目标为桌面窗口树，已有的独立暗角表面与普通应用窗口不属于该窗口树；刷新期间不隐藏暗角、不模拟快捷键、不改变应用窗口状态。
 
 登录启动使用当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Nocturne`。移动发行目录后需重新应用此选项；取消勾选并应用可移除启动项，关闭暗角本身不取消登录启动。退出后台后透明表面随进程释放。
-
-## 构建
-
-需要 .NET 8 SDK、可访问 NuGet 的网络、Windows x64 和 llvm-mingw UCRT x64 工具链。本次使用 20261020 版 llvm-mingw。
-
-```powershell
-./build.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
-# 使用系统自带 makecab 和 Windows Installer API 制作当前用户 MSI
-./installer/build-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
-# 原生动画、图标保护、快速反向和资源释放测试，不操作现有应用窗口
-./tests/run.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
-```
-
-程序产物为 `dist\Penumbra-Beta-0.3-r1` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-Beta-0.3-r1\Penumbra-Beta-0.3-r1-Setup-x64.msi`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
+</div>

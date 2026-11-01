@@ -18,6 +18,7 @@ public sealed partial class MainWindow : Window
     private bool ready;
     private bool busy;
     private bool previewRenderPending;
+    private bool updatingBlurControls;
     private bool? wideLayout;
     private DesktopSnapshot? snapshot;
     private double previewAspect = 16.0 / 9.0;
@@ -28,6 +29,8 @@ public sealed partial class MainWindow : Window
     private bool windowClosed;
     private WriteableBitmap? previewBitmap;
     private byte[]? previewPixels;
+    private byte[]? blurredPreview;
+    private double blurredPreviewRadius = -1;
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private static string RendererPath => Path.Combine(AppContext.BaseDirectory, "Nocturne.Renderer.exe");
     public string DisplayVersion => typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion.Split('+')[0];
@@ -38,6 +41,7 @@ public sealed partial class MainWindow : Window
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(TitleBar);
         var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         windowSizing = new WindowSizing(hwnd, 480, 320);
         wallpaperStatusTimer = DispatcherQueue.GetForCurrentThread().CreateTimer();
         wallpaperStatusTimer.Interval = TimeSpan.FromSeconds(5);
@@ -49,6 +53,7 @@ public sealed partial class MainWindow : Window
         };
         Closed += (_, _) =>
         {
+
             windowClosed = true;
             wallpaperStatusTimer.Stop();
             previewTimer?.Stop();
@@ -85,6 +90,12 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception e) { StatusText.Text = "读取配置失败：" + e.Message; }
         ready = true;
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000))
+        {
+            BlurEnabledCheckBox.IsEnabled = false;
+            ToolTipService.SetToolTip(BlurEnabledCheckBox, "桌面实时模糊需要 Windows 11；当前系统仍可正常使用暗角。");
+        }
+        UpdateBlurControls();
     }
     private void LoadControls(Settings s)
     {
@@ -96,6 +107,9 @@ public sealed partial class MainWindow : Window
         TintCombo.SelectedIndex = s.Tint; MonitorCombo.SelectedIndex = s.PrimaryOnly ? 1 : 0;
         DarkenIconsCheckBox.IsChecked = s.DarkenIcons;
         FocusOnlyCheckBox.IsChecked = s.FocusOnly;
+        BlurEnabledCheckBox.IsChecked = s.BlurEnabled;
+        BlurRadiusSlider.Value = s.BlurRadius;
+        UpdateBlurControls();
         ready = wasReady;
         if (wasReady) SchedulePreviewRender();
     }
@@ -106,7 +120,39 @@ public sealed partial class MainWindow : Window
         return new(OpacitySlider.Value / 100, RadiusSlider.Value / 100, FeatherSlider.Value / 100,
             ShapeSlider.Value / 100, Math.Clamp(CenterXBox.Value / 100, 0, 1), Math.Clamp(CenterYBox.Value / 100, 0, 1),
             Math.Clamp(TintCombo.SelectedIndex, 0, 2), MonitorCombo.SelectedIndex == 1,
-            DarkenIconsCheckBox.IsChecked == true, FocusOnlyCheckBox.IsChecked == true);
+            DarkenIconsCheckBox.IsChecked == true, FocusOnlyCheckBox.IsChecked == true,
+            OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) && BlurEnabledCheckBox.IsChecked == true,
+            BlurRadiusSlider.Value);
+    }
+    private void UpdateBlurControls()
+    {
+        if (BlurRadiusSlider is null || BlurRadiusBox is null || updatingBlurControls) return;
+        updatingBlurControls = true;
+        try { BlurRadiusBox.Value = BlurRadiusSlider.Value; }
+        finally { updatingBlurControls = false; }
+    }
+    private void BlurOption_Changed(object sender, RoutedEventArgs e)
+    {
+        UpdateBlurControls();
+
+        SchedulePreviewRender();
+    }
+    private void BlurRadius_Changed(object sender, RangeBaseValueChangedEventArgs e)
+    {
+        if (updatingBlurControls) return;
+        UpdateBlurControls();
+
+        SchedulePreviewRender();
+    }
+    private void BlurRadiusBox_Changed(NumberBox sender, NumberBoxValueChangedEventArgs e)
+    {
+        if (updatingBlurControls || BlurRadiusSlider is null || !double.IsFinite(e.NewValue)) return;
+        updatingBlurControls = true;
+        try { BlurRadiusSlider.Value = Math.Clamp(Math.Round(e.NewValue), 0, 48); }
+        finally { updatingBlurControls = false; }
+        UpdateBlurControls();
+
+        SchedulePreviewRender();
     }
     private void Parameter_Changed(object sender, RangeBaseValueChangedEventArgs e)
     {
@@ -126,13 +172,14 @@ public sealed partial class MainWindow : Window
     }
     private void SchedulePreviewRender()
     {
-        if (!ready || snapshot is null || previewTimer is null) return;
+        if (!ready || previewTimer is null) return;
         if (previewRenderPending) return;
         previewRenderPending = true;
         previewTimer.Start();
     }
     private void Reset_Click(object sender, RoutedEventArgs e)
     {
+
         LoadControls(new Settings());
         StatusText.Text = "已恢复默认参数";
     }
@@ -175,6 +222,19 @@ public sealed partial class MainWindow : Window
             PreviewCanvas.Background = new ImageBrush { ImageSource = previewBitmap, Stretch = Stretch.Uniform };
         }
         var pixels = previewPixels;
+        byte[] source = snapshot.Pixels;
+        if (s.BlurEnabled)
+        {
+            if (blurredPreview is null || blurredPreviewRadius != s.BlurRadius)
+            {
+                // Approximation only: host-backdrop's baseline depends on
+                // Windows, DPI and policy. Never claim screenshot equality.
+                double sigma = BlurParameters.PreviewSigma(s.BlurRadius, w, GetSystemMetrics(0));
+                blurredPreview = PreviewBlur.Apply(snapshot.Pixels, w, h, sigma);
+                blurredPreviewRadius = s.BlurRadius;
+            }
+            source = blurredPreview;
+        }
         int[] tint = s.Tint switch { 1 => [14, 22, 40], 2 => [27, 18, 16], _ => [0, 0, 0] };
         for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++)
@@ -184,9 +244,9 @@ public sealed partial class MainWindow : Window
             double t = Math.Clamp((Math.Sqrt(dx * dx + dy * dy) - s.Radius) / s.Feather, 0, 1);
             double a = snapshot.Icons[y * w + x] != 0 && !s.DarkenIcons ? 0 : s.Opacity * t * t * (3 - 2 * t);
             int i = (y * w + x) * 4;
-            pixels[i] = (byte)(snapshot.Pixels[i] * (1 - a) + tint[2] * a);
-            pixels[i + 1] = (byte)(snapshot.Pixels[i + 1] * (1 - a) + tint[1] * a);
-            pixels[i + 2] = (byte)(snapshot.Pixels[i + 2] * (1 - a) + tint[0] * a); pixels[i + 3] = 255;
+            pixels[i] = (byte)(source[i] * (1 - a) + tint[2] * a);
+            pixels[i + 1] = (byte)(source[i + 1] * (1 - a) + tint[1] * a);
+            pixels[i + 2] = (byte)(source[i + 2] * (1 - a) + tint[0] * a); pixels[i + 3] = 255;
         }
         using (var stream = previewBitmap.PixelBuffer.AsStream())
         {
@@ -224,6 +284,7 @@ public sealed partial class MainWindow : Window
         StatusText.Text = "正在刷新壁纸…";
         var captured = await DesktopSnapshot.CaptureAsync();
         snapshot = captured;
+        blurredPreview = null;
         previewAspect = (double)captured.Width / captured.Height;
         ResizePreview();
         PreviewEmpty.Visibility = Visibility.Collapsed;
@@ -262,6 +323,7 @@ public sealed partial class MainWindow : Window
     private async void Apply_Click(object sender, RoutedEventArgs e)
     {
         if (busy) return;
+
         busy = true;
         SetCommandsEnabled(false);
         SettingsScrollViewer.IsEnabled = false;
@@ -279,7 +341,7 @@ public sealed partial class MainWindow : Window
                 if (StartupToggle.IsOn) key.SetValue("Nocturne", $"\"{RendererPath}\"");
                 else key.DeleteValue("Nocturne", false);
             }
-            StatusText.Text = "正在启动新版桌面暗角…";
+            StatusText.Text = "正在启动桌面效果…";
             await Task.Run(() =>
             {
                 using var current = Process.GetCurrentProcess();
@@ -297,7 +359,7 @@ public sealed partial class MainWindow : Window
             using var applied = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\Nocturne.Applied.v1");
             applied.Reset();
             using var process = Process.Start(new ProcessStartInfo(RendererPath) { UseShellExecute = false });
-            StatusText.Text = "正在生成并挂接桌面暗角…";
+            StatusText.Text = "正在生成并挂接桌面效果…";
             bool completed = await Task.Run(() => applied.WaitOne(TimeSpan.FromSeconds(12)));
             DrawPreview(s);
             string status = Path.Combine(Settings.DirectoryPath, "status.txt");
@@ -324,5 +386,6 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { StatusText.Text = "关闭失败：" + ex.Message; }
     }
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
 }
