@@ -17,6 +17,7 @@ static void Pump(unsigned duration) {
         if(!DispatchWork(2)) std::abort();
     } while(GetTickCount64()<end);
 }
+constexpr unsigned FullTransitionWaitMs=(unsigned)focus_animation::Transition::DurationMs+50;
 static SIZE_T PrivateBytes() {
     PROCESS_MEMORY_COUNTERS_EX counters{};
     GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),sizeof(counters));
@@ -82,7 +83,7 @@ int main() {
     }
     params.tint=0;
     }
-    Pump(470);
+    Pump(FullTransitionWaitMs);
     // Neither inspection nor production retains a CPU bitmap at rest.
     DWORD inspectionGdi=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
     if(Check(!animationTimerArmed&&surfaces[0].uploaded&&IsWindow(surfaces[0].hwnd),"visible rest has no animation timer")) return 1;
@@ -93,17 +94,48 @@ int main() {
     double after=transition.Value(ClockMs());
     if(Check(std::abs(before-after)<.025,"mid-flight reversal is continuous")) return 1;
     if(Check(transition.Velocity(ClockMs())>0,"reversal immediately moves towards new target")) return 1;
-    Pump(470); SetVisibility(false); Pump(470);
+    Pump(FullTransitionWaitMs); SetVisibility(false); Pump(FullTransitionWaitMs);
     HWND cached=surfaces[0].hwnd;
     if(Check(!animationTimerArmed&&surfaces[0].uploaded&&!IsWindowVisible(cached),"hidden keeps only OS-owned cached surface")) return 1;
     if(Check(GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS)==inspectionGdi,"hidden has no production GDI buffers")) return 1;
     SetVisibility(true);
     if(Check(animationTimerArmed&&surfaces[0].hwnd==cached&&surfaces[0].opacity<5,"fully hidden fade reuses cache and starts transparent")) return 1;
-    Pump(470); SetVisibility(false,false);
+    Pump(FullTransitionWaitMs); SetVisibility(false,false);
     if(Check(!animationTimerArmed&&!IsWindowVisible(surfaces[0].hwnd),"explicit immediate hide")) return 1;
     params.opacity=0;SetVisibility(true);
     if(Check(!animationTimerArmed&&!IsWindowVisible(surfaces[0].hwnd),"zero opacity never shows surface")) return 1;
     params.opacity=.68;
+    // Check the actual production frame dispatcher and submitted alpha, not
+    // only the ideal easing formula. Keep diagnostics in test memory only.
+    for(bool showing:{true,false}) {
+        traceAnimation=true;traceFileOutput=false;frameTrace.clear();
+        SetVisibility(showing);
+        Pump(100);
+        if(Check(!frameTrace.empty(),"timed fade produces frames")) return 1;
+        const auto first=frameTrace.front(),sample=frameTrace.back();
+        double elapsed=sample.tick-first.tick;
+        BYTE expectedAlpha=(BYTE)std::lround(255*focus_animation::Opacity(sample.value));
+        if(Check(surfaces[0].opacity==expectedAlpha,"easing reaches native submitted alpha")) return 1;
+        Pump(FullTransitionWaitMs);
+        if(Check(!animationTimerArmed&&transition.Value(ClockMs())==(showing?1:0)&&transition.Velocity(ClockMs())==0,"timed fade settles and stops timer")) return 1;
+        double start=frameTrace.front().tick;
+        double previousProgress=0;
+        double values[3]{};
+        for(const auto& frame:frameTrace) {
+            double progress=showing?frame.value:1-frame.value;
+            if(Check(progress+1e-9>=previousProgress&&progress>=0&&progress<=1,"submitted easing is monotonic")) return 1;
+            previousProgress=progress;
+        }
+        for(int step=0;step<3;step++) {
+            const FrameTrace* closest=&frameTrace.front();double target=(step+1)*100.0;
+            for(const auto& frame:frameTrace) if(std::abs(frame.tick-start-target)<std::abs(closest->tick-start-target)) closest=&frame;
+            values[step]=showing?closest->value:1-closest->value;
+        }
+        if(Check(values[0]>.50&&values[0]<.75&&values[0]>2*(values[1]-values[0])&&values[1]-values[0]>1.5*(values[2]-values[1]),"real frames start fast and progressively decelerate")) return 1;
+        std::printf("{\"Stage\":\"SubmittedEaseOut\",\"Showing\":%s,\"DurationMs\":%.0f,\"FirstSampleMs\":%.3f,\"FirstSampleAlpha\":%u,\"Progress100ms\":%.5f,\"Progress200ms\":%.5f,\"Progress300ms\":%.5f,\"Frames\":%llu,\"EndpointVelocity\":0,\"IdleTimer\":false}\n",
+            showing?"true":"false",focus_animation::Transition::DurationMs,elapsed,expectedAlpha,values[0],values[1],values[2],(unsigned long long)frameTrace.size());
+        traceAnimation=false;frameTrace.clear();
+    }
     // Exercise the actual production wait/message dispatcher under a busy
     // message queue, not only the rendering function or an ideal test timer.
     traceAnimation=true; frameTrace.clear(); SetVisibility(true);
@@ -113,13 +145,13 @@ int main() {
     size_t busyFrames=frameTrace.size();
     traceAnimation=false; frameTrace.clear();
     if(Check(busyFrames>=4,"waitable frame timer survives queued message traffic")) return 1;
-    Pump(470); SetVisibility(false); Pump(470);
+    Pump(FullTransitionWaitMs); SetVisibility(false); Pump(FullTransitionWaitMs);
     // Warm up allocations, then require stable GDI resources and private memory.
-    for(int i=0;i<2;i++) { SetVisibility(true); Pump(470); SetVisibility(false); Pump(470); }
+    for(int i=0;i<2;i++) { SetVisibility(true); Pump(FullTransitionWaitMs); SetVisibility(false); Pump(FullTransitionWaitMs); }
     SIZE_T memoryBefore=PrivateBytes();
     for(int i=0;i<12;i++) {
         SetVisibility(true); Pump(45); SetVisibility(false); Pump(45); SetVisibility(true); Pump(45);
-        SetVisibility(false); Pump(470);
+        SetVisibility(false); Pump(FullTransitionWaitMs);
         if(Check(!animationTimerArmed&&surfaces[0].hwnd==cached&&!IsWindowVisible(cached),"rapid-switch idle and cache reuse")) return 1;
     }
     SIZE_T memoryAfter=PrivateBytes();

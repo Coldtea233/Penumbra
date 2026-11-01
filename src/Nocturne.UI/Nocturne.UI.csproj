@@ -1,10 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>0.3.0-beta</Version>
-    <InformationalVersion>Beta 0.3</InformationalVersion>
-    <AssemblyVersion>0.3.0.0</AssemblyVersion>
-    <FileVersion>0.3.0.0</FileVersion>
+    <Version>0.3.1-beta</Version>
+    <InformationalVersion>Beta 0.3 r1</InformationalVersion>
+    <AssemblyVersion>0.3.1.0</AssemblyVersion>
+    <FileVersion>0.3.1.0</FileVersion>
     <AssemblyName>Penumbra</AssemblyName>
     <Product>Penumbra 半影</Product>
     <Authors>冷茶Reicha</Authors>

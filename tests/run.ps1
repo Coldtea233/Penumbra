@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 if(!$Toolchain){throw 'Pass -Toolchain with the llvm-mingw directory.'}
 $testDirectory=Join-Path $PSScriptRoot 'bin'
 New-Item -ItemType Directory -Force $testDirectory|Out-Null
-$testNames=@('RendererTests')
+$testNames=@('DesktopLayeringTests','RendererTests')
 if($WindowEvents){$testNames+='WindowPresenceTests'}
 if($VisualProbe){$testNames+='LayeredOpacityTests'}
 foreach($testName in $testNames){

@@ -1,8 +1,8 @@
 #include <winver.h>
 1 24 "launcher.manifest"
 1 VERSIONINFO
-FILEVERSION 0,3,0,0
-PRODUCTVERSION 0,3,0,0
+FILEVERSION 0,3,1,0
+PRODUCTVERSION 0,3,1,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -11,9 +11,9 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "Penumbra Launcher"
-            VALUE "FileVersion", "0.3.0.0"
+            VALUE "FileVersion", "0.3.1.0"
             VALUE "ProductName", "Penumbra"
-            VALUE "ProductVersion", "Beta 0.3"
+            VALUE "ProductVersion", "Beta 0.3 r1"
         END
     END
     BLOCK "VarFileInfo"

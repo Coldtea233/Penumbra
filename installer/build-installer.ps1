@@ -1,7 +1,7 @@
 param(
     [string]$Toolchain=$env:LLVM_MINGW_ROOT,
-    [string]$PublishDirectory=(Join-Path $PSScriptRoot '..\dist\Penumbra-Beta-0.3'),
-    [string]$OutputDirectory=(Join-Path $PSScriptRoot '..\dist\release-Beta-0.3')
+    [string]$PublishDirectory=(Join-Path $PSScriptRoot '..\dist\Penumbra-Beta-0.3-r1'),
+    [string]$OutputDirectory=(Join-Path $PSScriptRoot '..\dist\release-Beta-0.3-r1')
 )
 $ErrorActionPreference='Stop'
 if(!$Toolchain){throw 'Pass -Toolchain with the llvm-mingw x64 directory.'}
@@ -11,7 +11,7 @@ if(!(Test-Path -LiteralPath (Join-Path $publish 'app\Penumbra.exe'))){throw 'Bui
 New-Item -ItemType Directory -Force -Path $output|Out-Null
 $buildDirectory=Join-Path $output ('build-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $buildDirectory|Out-Null
-$msiPath=Join-Path $output 'Penumbra-Beta-0.3-Setup-x64.msi'
+$msiPath=Join-Path $output 'Penumbra-Beta-0.3-r1-Setup-x64.msi'
 if(Test-Path -LiteralPath $msiPath){throw "Output already exists; choose another directory: $msiPath"}
 
 # Use Windows' own MSI database/cabinet tools; no packager runtime is shipped.
@@ -59,7 +59,7 @@ public static class PenumbraMsi {
  public static void Summary(uint database,string packageCode) {
    uint summary;Check(MsiGetSummaryInformation(database,null,20,out summary),"Open summary");
    try{Check(MsiSummaryInfoSetProperty(summary,1,2,936,IntPtr.Zero,null),"Code page");
-     var values=new Dictionary<uint,string>{{2,"Penumbra 半影 Beta 0.3"},{3,"Desktop vignette utility"},{4,"冷茶Reicha"},{5,"Penumbra;Desktop;Vignette"},{7,"x64;2052"},{9,packageCode}};
+     var values=new Dictionary<uint,string>{{2,"Penumbra 半影 Beta 0.3 r1"},{3,"Desktop vignette utility"},{4,"冷茶Reicha"},{5,"Penumbra;Desktop;Vignette"},{7,"x64;2052"},{9,packageCode}};
      foreach(var pair in values)Check(MsiSummaryInfoSetProperty(summary,pair.Key,30,0,IntPtr.Zero,pair.Value),"Summary string");
      Check(MsiSummaryInfoSetProperty(summary,14,3,500,IntPtr.Zero,null),"Installer version");
      Check(MsiSummaryInfoSetProperty(summary,15,3,10,IntPtr.Zero,null),"Compressed long filenames, no elevation");
@@ -128,8 +128,8 @@ try{
     foreach($entry in $schemas.GetEnumerator()){[PenumbraMsi]::Sql($database,('CREATE TABLE `'+$entry.Key+'` ('+$entry.Value+')'))}
     $upgrade='{0CB1971B-FE53-4E66-9699-C87884CB2D4E}'
     $properties=@{
-        ProductCode='{1120FEAB-73E8-4879-934D-BC1C5AB7930C}';UpgradeCode=$upgrade;ProductName='Penumbra 半影';ProductVersion='0.3.0';ProductLanguage='2052';Manufacturer='冷茶Reicha'
-        MSIINSTALLPERUSER='1';LIMITUI='1';ARPNOMODIFY='1';ARPNOREPAIR='1';REBOOT='ReallySuppress';INSTALLLEVEL='1';ARPCOMMENTS='Penumbra 半影 Beta 0.3 · 桌面暗角';ARPURLINFOABOUT='https://github.com/Coldtea233/Penumbra';SecureCustomProperties='OLDPRODUCTS;NEWERPRODUCTFOUND;INSTALLFOLDER'
+        ProductCode='{2A7F918E-D9AC-4259-AEEA-6E0F0D4D7743}';UpgradeCode=$upgrade;ProductName='Penumbra 半影';ProductVersion='0.3.1';ProductLanguage='2052';Manufacturer='冷茶Reicha'
+        MSIINSTALLPERUSER='1';LIMITUI='1';ARPNOMODIFY='1';ARPNOREPAIR='1';REBOOT='ReallySuppress';INSTALLLEVEL='1';ARPCOMMENTS='Penumbra 半影 Beta 0.3 r1 · 桌面暗角';ARPURLINFOABOUT='https://github.com/Coldtea233/Penumbra';SecureCustomProperties='OLDPRODUCTS;NEWERPRODUCTFOUND;INSTALLFOLDER'
     }
     foreach($entry in $properties.GetEnumerator()){Row 'Property' @('Property','Value') @($entry.Key,$entry.Value)}
     Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @('TARGETDIR',$null,'SourceDir')
@@ -148,7 +148,7 @@ try{
         Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @($id,$directories[$parent],$alias)
         $directories[$relative]=$id
     }
-    Row 'Feature' @('Feature','Title','Description','Display','Level','Directory_','Attributes') @('Main','Penumbra 半影','桌面暗角工具 Beta 0.3',1,1,'INSTALLFOLDER',0)
+    Row 'Feature' @('Feature','Title','Description','Display','Level','Directory_','Attributes') @('Main','Penumbra 半影','桌面暗角工具 Beta 0.3 r1',1,1,'INSTALLFOLDER',0)
     foreach($item in $rows){
         $parent=Split-Path $item.Relative -Parent;$registry='R_'+$item.Id.Substring(2)
         Row 'Component' @('Component','ComponentId','Directory_','Attributes','KeyPath') @($item.Component,(StableGuid $item.Relative),$directories[$parent],260,$registry)
@@ -164,7 +164,7 @@ try{
     }
     $launcher=$rows|Where-Object Relative -eq 'Penumbra.exe'|Select-Object -First 1
     if(!$launcher){throw 'Root launcher missing.'}
-    Row 'Shortcut' @('Shortcut','Directory_','Name','Component_','Target','Description','ShowCmd','WkDir') @('StartMenu','MenuFolder','PENUMBRA|Penumbra 半影',$launcher.Component,('[#'+$launcher.Id+']'),'Penumbra 半影 Beta 0.3',1,'INSTALLFOLDER')
+    Row 'Shortcut' @('Shortcut','Directory_','Name','Component_','Target','Description','ShowCmd','WkDir') @('StartMenu','MenuFolder','PENUMBRA|Penumbra 半影',$launcher.Component,('[#'+$launcher.Id+']'),'Penumbra 半影 Beta 0.3 r1',1,'INSTALLFOLDER')
     Row 'RemoveFile' @('FileKey','Component_','DirProperty','InstallMode') @('EmptyMenuFolder',$launcher.Component,'MenuFolder',2)
     Row 'Media' @('DiskId','LastSequence','Cabinet') @(1,[int]$rows.Count,'#payload.cab')
     Row '_Streams' @('Name','Data') @('payload.cab',([PenumbraMsi+Stream]::new((Join-Path $buildDirectory 'payload.cab'))))
@@ -172,8 +172,8 @@ try{
     foreach($action in @(@('CheckEnvironment',1,'CheckEnvironment'),@('PrepareStartupCleanup',1,'PrepareStartupCleanup'),@('RollbackOwnedStartup',1281,'RollbackOwnedStartup'),@('RemoveOwnedStartup',1025,'RemoveOwnedStartup'))){
         Row 'CustomAction' @('Action','Type','Source','Target') @($action[0],[int]$action[1],'InstallerActions',$action[2])
     }
-    Row 'Upgrade' @('UpgradeCode','VersionMin','VersionMax','Attributes','ActionProperty') @($upgrade,'0.0.0','0.3.0',257,'OLDPRODUCTS')
-    Row 'Upgrade' @('UpgradeCode','VersionMin','Attributes','ActionProperty') @($upgrade,'0.3.0',258,'NEWERPRODUCTFOUND')
+    Row 'Upgrade' @('UpgradeCode','VersionMin','VersionMax','Attributes','ActionProperty') @($upgrade,'0.0.0','0.3.1',257,'OLDPRODUCTS')
+    Row 'Upgrade' @('UpgradeCode','VersionMin','Attributes','ActionProperty') @($upgrade,'0.3.1',258,'NEWERPRODUCTFOUND')
     Row 'LaunchCondition' @('Condition','Description') @('VersionNT64','Penumbra 需要 64 位 Windows。')
     Row 'LaunchCondition' @('Condition','Description') @('Installed OR NOT NEWERPRODUCTFOUND','已安装相同或更新版本的 Penumbra，请先从系统设置卸载。')
     $actions=@(
@@ -192,4 +192,4 @@ try{
     [PenumbraMsi]::Summary($database,('{'+[Guid]::NewGuid().ToString().ToUpperInvariant()+'}'))
     [PenumbraMsi]::Check([PenumbraMsi]::MsiDatabaseCommit($database),'Commit MSI')
 }finally{[PenumbraMsi]::MsiCloseHandle($database)|Out-Null}
-Write-Output ([pscustomobject]@{Installer=$msiPath;Files=$rows.Count;PayloadBytes=($files|Measure-Object Length -Sum).Sum;InstallerBytes=(Get-Item -LiteralPath $msiPath).Length;ProductVersion='0.3.0';DisplayVersion='Beta 0.3';PerUser=$true}|ConvertTo-Json -Compress)
+Write-Output ([pscustomobject]@{Installer=$msiPath;Files=$rows.Count;PayloadBytes=($files|Measure-Object Length -Sum).Sum;InstallerBytes=(Get-Item -LiteralPath $msiPath).Length;ProductVersion='0.3.1';DisplayVersion='Beta 0.3 r1';PerUser=$true}|ConvertTo-Json -Compress)

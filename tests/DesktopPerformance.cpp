@@ -41,12 +41,13 @@ int main() {
     for(auto& s:surfaces) if(!Render(s,0)) return 2;
     Result("PrepareOnce",ClockMs()-start,CpuMs()-cpu);
     start=ClockMs();cpu=CpuMs();PumpFor(10000);Result("HiddenIdle",ClockMs()-start,CpuMs()-cpu);
-    SetVisibility(true);PumpFor(480);
+    const double settleMs=focus_animation::Transition::DurationMs+40;
+    SetVisibility(true);PumpFor(settleMs);
     start=ClockMs();cpu=CpuMs();PumpFor(10000);Result("VisibleIdle",ClockMs()-start,CpuMs()-cpu);
-    SetVisibility(false);PumpFor(480);
+    SetVisibility(false);PumpFor(settleMs);
     traceAnimation=true;traceFileOutput=false;frameTrace.clear();
     start=ClockMs();cpu=CpuMs();
-    for(int i=0;i<12;i++) { SetVisibility(true);PumpFor(440);SetVisibility(false);PumpFor(440); }
+    for(int i=0;i<12;i++) { SetVisibility(true);PumpFor(settleMs);SetVisibility(false);PumpFor(settleMs); }
     Result("24FullTransitions",ClockMs()-start,CpuMs()-cpu);
     std::vector<double> gaps,costs;
     for(size_t i=0;i<frameTrace.size();i++) {

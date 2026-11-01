@@ -261,19 +261,21 @@ bool PositionSurface(Surface& s, bool show) {
     if(!s.hwnd) return true;
     if(!show || paused || capturingPreview || (!transition.Target() && !animationTimerArmed)) { ShowWindow(s.hwnd,SW_HIDE); return true; }
     if(!IsWindow(desktop)) return false;
-    // An unowned top-level window is composited above Explorer's wallpaper
-    // visuals. Keep it immediately above the desktop, below all normal apps.
-    // Passing desktop itself would put the surface *behind* the desktop.
-    HWND anchor=GetWindow(desktop,GW_HWNDPREV);
-    while(anchor) {
-        wchar_t name[80]{}; GetClassNameW(anchor,name,80);
-        if(wcscmp(name,L"Nocturne.Surface")!=0) break;
-        anchor=GetWindow(anchor,GW_HWNDPREV);
+    // A foreign insert-after HWND can belong to an elevated tool (e.g. PixPin),
+    // making SetWindowPos fail with ERROR_ACCESS_DENIED. Own our popup by the
+    // desktop instead: Windows keeps owned windows above their owner, so
+    // HWND_BOTTOM puts us just above the desktop and below ordinary apps.
+    // Only change OUR window; never reposition Explorer or a foreign app.
+    if(GetWindow(s.hwnd,GW_OWNER)!=desktop) {
+        SetLastError(ERROR_SUCCESS);
+        if(!SetWindowLongPtrW(s.hwnd,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(desktop))&&GetLastError()!=ERROR_SUCCESS)
+            return false;
     }
-    if(GetWindowLongPtrW(s.hwnd,GWL_EXSTYLE)&WS_EX_TOPMOST)
-        SetWindowPos(s.hwnd,HWND_NOTOPMOST,0,0,0,0,SWP_NOACTIVATE|SWP_NOMOVE|SWP_NOSIZE);
-    return SetWindowPos(s.hwnd,anchor?anchor:HWND_TOP,s.rect.left,s.rect.top,
-        s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,SWP_NOACTIVATE|SWP_SHOWWINDOW)!=FALSE;
+    // HWND_BOTTOM also clears an accidental topmost flag. Do not move or
+    // activate the owner, and do not promote the overlay to HWND_TOP on failure.
+    return SetWindowPos(s.hwnd,HWND_BOTTOM,s.rect.left,s.rect.top,
+        s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,
+        SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_SHOWWINDOW)!=FALSE;
 }
 BOOL CALLBACK CollectMonitor(HMONITOR monitor,HDC,LPRECT,LPARAM data) {
     MONITORINFOEXW info{}; info.cbSize=sizeof(info);
@@ -536,7 +538,9 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         else if(wp==1 && !paused) {
             HWND previous=desktop;
             bool intact=LocateDesktop() && previous==desktop && !surfaces.empty();
-            if(intact&&(transition.Target()||animationTimerArmed)) for(auto& s:surfaces) if(!IsWindow(s.hwnd)) { intact=false; break; }
+            // Hidden surfaces are cached too. Retry a failed/destroyed surface
+            // even when FailTransition reset the visibility target to false.
+            if(intact&&params.opacity>0) for(auto& s:surfaces) if(!IsWindow(s.hwnd)) { intact=false; break; }
             if(!intact) Rebuild();
             else {
                 UpdateWindowState();
@@ -566,8 +570,9 @@ int SelfTest() {
     if(Opacity(1)!=1||Opacity(0)!=0) return 6;
     if(Opacity(.75)!=.75||Opacity(.25)!=.25) return 7;
     Transition animation; animation.Reset(false); animation.Retarget(true,1000);
-    if(animation.Value(1000)!=0||!animation.Running(1100)||animation.Running(1420)||animation.Value(1420)!=1) return 8;
-    if(!(animation.Value(1020)>.08&&animation.Value(1020)<.10&&animation.Value(1210)==.75&&animation.Value(1400)>.995)) return 9;
+    double endpoint=1000+Transition::DurationMs;
+    if(animation.Value(1000)!=0||!animation.Running(1100)||animation.Running(endpoint)||animation.Value(endpoint)!=1||animation.Velocity(endpoint)!=0) return 8;
+    if(!(animation.Value(1050)>.36&&animation.Value(1050)<.39&&animation.Value(1100)>.60&&animation.Value(1100)<.64&&animation.Value(1360)>.97)) return 9;
     double partial=animation.Value(1120); animation.Retarget(false,1120);
     if(animation.Value(1120)!=partial||animation.Target()||animation.Value(2000)!=0) return 10;
     previous=0;
@@ -575,6 +580,12 @@ int SelfTest() {
         double value=i/100.0, opacity=Opacity(value);
         if(opacity<previous||opacity<0||opacity>1) return 11;
         previous=opacity;
+    }
+    double lastValue=0,lastSpeed=EaseOut(0).slope;
+    for(int i=1;i<=1000;i++) {
+        auto sample=EaseOut(i/1000.0);
+        if(sample.value<lastValue||sample.value>1||sample.slope<0||sample.slope>lastSpeed+1e-10) return 12;
+        lastValue=sample.value;lastSpeed=sample.slope;
     }
     return 0;
 }
