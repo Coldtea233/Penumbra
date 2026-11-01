@@ -1,5 +1,5 @@
 <div align=center>
-  <img src="https://github.com/user-attachments/assets/a5613c30-cba4-4c74-8d25-5122be13e780" width=200 />
+  <img src="https://github.com/user-attachments/assets/a5613c30-cba4-4c74-8d25-5122be13e780" width=100 />
 <h1>Penumbra · 半影</h1>
 
 **为你的桌面添加暗角与模糊，将专注留给前台窗口**
