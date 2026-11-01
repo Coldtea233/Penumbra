@@ -9,7 +9,7 @@
 [下载](https://github.com/Coldtea233/Penumbra/releases) ·
 [反馈问题](https://github.com/Coldtea233/Penumbra/issues)
 
-<div style="text-align: left">
+<div align=left>
 ## 核心特性
 
 - **优秀的性能**：约30MB内存占用 0.02% CPU占用
