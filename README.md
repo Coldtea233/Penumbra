@@ -10,7 +10,6 @@
 [反馈问题](https://github.com/Coldtea233/Penumbra/issues)
 
 <div align=left>
-## 核心特性 ##
 
 - **优秀的性能**：约30MB内存占用 0.02% CPU占用
 - **仅在必要时生效**：（可开关）仅在前台存在窗口时启用 暗角/模糊 效果
