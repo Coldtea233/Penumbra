@@ -4,7 +4,7 @@
 
 **为你的桌面添加暗角与模糊，将专注留给前台窗口**
 <div>
-  <img src="https://github.com/user-attachments/assets/2b278f3a-6198-4006-9053-4197fac8d995" width=600/>
+  <img src="https://github.com/user-attachments/assets/fa8d5b00-ac71-4e28-a2b2-a290efa95ec7" width=600/>
 </div>
 沉浸 · 自然 · 聚焦
 
@@ -18,30 +18,10 @@
 - **非线性动画**：暗角切入/切出动画使用720 毫秒强缓出曲线
 - **原生UI**：设置界面采用Windows原生WinUI3设计语言
 
-## Beta 0.4 下载与安装
-
-双击发行附件 `Penumbra-Beta-0.4-Setup-x64.exe`，或下载便携 ZIP 后完整解压。安装前请保存参数、关闭设置并从托盘退出后台。当前用户安装，无需管理员权限；内部使用 Windows Installer 保留旧版升级、回滚与系统卸载能力。安装包未签名，可能出现 SmartScreen 提示。
-
-本次包含桌面模糊与半径修订、托盘切换稳定性改进、软件/黑白托盘图标和“关于”信息卡。只发布已验证的 Beta 0.4，不包含 Beta 0.5 实验改动。半径 0 仍有系统基础模糊，关闭模糊开关才完全清晰；实时模糊需要 Windows 11。
-
-详细参数、兼容限制、资源占用与构建步骤见 [使用指南](USER-GUIDE.md)，测试边界见 [验证记录](TEST-REPORT.md)。
-
 ## 效果预览
 
-使用: 暗角
-
 <p align="center">
-  <img src=<img width="2880" height="1620" alt="image" src="https://github.com/user-attachments/assets/9b01b00b-0720-4b55-a7a4-85d357a7bfe6" />
- alt="亮色主题预览 1" width="22%" />
-</p>
-
-暗色主题
-
-<p align="center">
-  <img src="img/night_1.png" alt="暗色主题预览 1" width="22%" />
-  <img src="img/night_2.png" alt="暗色主题预览 2" width="22%" />
-  <img src="img/night_3.png" alt="暗色主题预览 3" width="22%" />
-  <img src="img/night_4.png" alt="暗色主题预览 4" width="22%" />
+  <img src="https://github.com/user-attachments/assets/9b01b00b-0720-4b55-a7a4-85d357a7bfe6" width="22%" />
 </p>
 
 ## 性能报告
