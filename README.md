@@ -1,13 +1,10 @@
 <div align=center>
-  <img src=<img width="867" height="880" alt="image" src="https://github.com/user-attachments/assets/ba47538b-696e-4724-8a01-735ec02379aa" />
- width=100 />
+  <img width="871" height="874" alt="image" src="https://github.com/user-attachments/assets/91902d92-a3a5-40fd-aad5-cf7a2f0f0516" width=100 />
 <h1>Penumbra · 半影</h1>
 
 **为你的桌面添加暗角与模糊，将专注留给前台窗口**
 <div>
   <img src=<img width="2708" height="1523" alt="2026-11-02_23-46-50" src="https://github.com/user-attachments/assets/2b278f3a-6198-4006-9053-4197fac8d995" />
- />
- />
 </div>
 沉浸 · 自然 · 聚焦
 
