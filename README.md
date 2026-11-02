@@ -3,7 +3,10 @@
 <h1>Penumbra · 半影</h1>
 
 **为你的桌面添加暗角与模糊，将专注留给前台窗口**
-
+<div>
+  <img src=<img width="2830" height="1523" alt="image" src="https://github.com/user-attachments/assets/14421363-f9d3-4cc2-8a96-3d4632f12802" />
+ />
+</div>
 沉浸 · 自然 · 聚焦
 
 [下载](https://github.com/Coldtea233/Penumbra/releases) ·
@@ -26,13 +29,11 @@
 
 ## 效果预览
 
-亮色主题
+使用: 暗角
 
 <p align="center">
-  <img src="img/light_1.png" alt="亮色主题预览 1" width="22%" />
-  <img src="img/light_2.png" alt="亮色主题预览 2" width="22%" />
-  <img src="img/light_3.png" alt="亮色主题预览 3" width="22%" />
-  <img src="img/light_4.png" alt="亮色主题预览 4" width="22%" />
+  <img src=<img width="2880" height="1620" alt="image" src="https://github.com/user-attachments/assets/9b01b00b-0720-4b55-a7a4-85d357a7bfe6" />
+ alt="亮色主题预览 1" width="22%" />
 </p>
 
 暗色主题
