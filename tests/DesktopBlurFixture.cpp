@@ -38,7 +38,11 @@ LRESULT CALLBACK Proc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     }
     if(msg==ReadContrast) return static_cast<LRESULT>(std::lround(Contrast(hwnd)*1000));
     if(msg==WM_TIMER&&wp==2) {
+        // Disabled blur is the reference for radius zero. Keep this pattern
+        // below the vignette in BOTH cases; otherwise its brightness changes
+        // just because a blur HWND was created, invalidating the comparison.
         HWND blur=FindWindowW(L"Nocturne.BlurSurface",nullptr);
+        if(!blur) blur=FindWindowW(L"Nocturne.Surface",nullptr);
         bool below=false;
         if(blur) for(HWND next=GetWindow(blur,GW_HWNDNEXT);next;next=GetWindow(next,GW_HWNDNEXT)) if(next==hwnd) { below=true; break; }
         if(blur&&!below) {

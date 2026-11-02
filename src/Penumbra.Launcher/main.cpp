@@ -7,7 +7,7 @@
 static int ShowError(const wchar_t* message, DWORD error = 0) {
     std::wstring text(message);
     if (error) text += L"\n\nWindows 错误码：" + std::to_wstring(error);
-    MessageBoxW(nullptr, text.c_str(), L"Penumbra 半影", MB_OK | MB_ICONERROR);
+    MessageBoxW(nullptr, text.c_str(), L"Penumbra", MB_OK | MB_ICONERROR);
     return 1;
 }
 

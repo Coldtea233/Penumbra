@@ -2,8 +2,9 @@ namespace Nocturne;
 
 internal static class BlurParameters
 {
-    // Keep this calibration in sync with the native blur_parameters.h.
-    internal const double BaselineSigma = 30;
+    // The desktop source is unfiltered. Match native blur_parameters.h with
+    // no hidden baseline: 0 must leave the original preview unchanged.
     internal static double PreviewSigma(double radius, int previewWidth, int screenWidth) =>
-        (BaselineSigma + Math.Clamp(radius, 0, 48)) * previewWidth / Math.Max(previewWidth, screenWidth);
+        Math.Clamp(double.IsFinite(radius) ? radius : 12, 0, 48)
+            * previewWidth / Math.Max(previewWidth, screenWidth);
 }

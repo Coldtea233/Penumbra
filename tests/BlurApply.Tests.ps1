@@ -56,6 +56,18 @@ function Ini(){
     $values
 }
 function Number($values,[string]$key){[double]::Parse($values[$key],[Globalization.CultureInfo]::InvariantCulture)}
+function Desktop-Contrast(){
+    $fixture=[BlurApplyNative]::FindWindow('Penumbra.DesktopBlurFixture',[IntPtr]::Zero)
+    if($fixture -eq [IntPtr]::Zero){throw 'Actual desktop fixture unavailable.'}
+    $samples=@()
+    for($sample=0;$sample -lt 6;$sample++){
+        $pixel=[UIntPtr]::Zero
+        if([BlurApplyNative]::SendMessageTimeout($fixture,32848,[IntPtr]::Zero,[IntPtr]::Zero,2,1000,[ref]$pixel) -eq [IntPtr]::Zero){throw 'Actual desktop sampling timed out.'}
+        $samples+=$pixel.ToUInt64()/1000.0
+        Start-Sleep -Milliseconds 100
+    }
+    ($samples|Measure-Object -Average).Average
+}
 function Apply-Radius([double]$value){
     $blurExpected=(Toggle 'BlurEnabledCheckBox').Current.ToggleState -eq [Windows.Automation.ToggleState]::On
     (Range 'BlurRadiusSlider').SetValue($value)
@@ -65,7 +77,7 @@ function Apply-Radius([double]$value){
         Start-Sleep -Milliseconds 100
         if(!(Control 'ApplyButton').Current.IsEnabled){continue}
         $text=(Control 'StatusText').Current.Name
-        if($text -match '模糊附加半径 (\d+) px' -and [int]$Matches[1] -eq $value){$done=$true;break}
+        if($text -match '模糊半径 (\d+) px' -and [int]$Matches[1] -eq $value){$done=$true;break}
         if(!$blurExpected -and $text -match '^暗角已应用'){$done=$true;break}
         if($text -match '失败|不可用|未响应'){throw $text}
     }
@@ -143,6 +155,14 @@ $dpi=[BlurApplyNative]::SetThreadDpiAwarenessContext([IntPtr](-4))
 $applied=$false
 $script:desktopContrasts=@{}
 try{
+    if($MeasureDesktopFixture){
+        if((Toggle 'BlurEnabledCheckBox').Current.ToggleState -eq [Windows.Automation.ToggleState]::On){(Toggle 'BlurEnabledCheckBox').Toggle()}
+        $applied=$true;Apply-Radius 0
+        Start-Sleep -Milliseconds 1000
+        $plainContrast=Desktop-Contrast
+        if($plainContrast -lt 25){throw 'Unblurred fixture is not readable; refusing a false zero-radius pass.'}
+        [pscustomobject]@{BlurDisabledDesktopContrast=$plainContrast}|ConvertTo-Json -Compress|Write-Host
+    }
     if((Toggle 'BlurEnabledCheckBox').Current.ToggleState -ne [Windows.Automation.ToggleState]::On){(Toggle 'BlurEnabledCheckBox').Toggle()}
     if($scroll.Current.VerticallyScrollable){$scroll.SetScrollPercent(-1,0)}
     if(!$SkipPreviewPixels){
@@ -154,14 +174,18 @@ try{
         if(@($previewHashes|Select-Object -Unique).Count -ne 5){throw 'The rendered UI preview did not change across all five radii.'}
         Write-Host 'RenderedPreviewFiveDistinctRadii=PASS'
     }
-    foreach($value in @(0,12,48)){$applied=$true;Apply-Radius $value}
+    foreach($value in @(0,1,12,48)){$applied=$true;Apply-Radius $value}
+    if($MeasureDesktopFixture){
+        if([Math]::Abs($script:desktopContrasts[0]-$plainContrast) -gt .1){throw 'Zero radius still differs from disabling blur.'}
+        if(!($script:desktopContrasts[1] -lt $plainContrast -and $script:desktopContrasts[1] -gt $plainContrast*.93)){throw 'Radius one must be a slight, non-zero blur.'}
+    }
     if($MeasureDesktopFixture -and !($script:desktopContrasts[12] -lt $script:desktopContrasts[0]*0.9 -and $script:desktopContrasts[48] -lt $script:desktopContrasts[12]*0.75)){throw 'Actual desktop pixels did not respond sufficiently to increasing blur radius.'}
     if($LiveRadius){
         $backend=Get-Process 'Nocturne.Renderer'|Select-Object -First 1
         $controller=[BlurApplyNative]::FindWindow('Nocturne.Controller',[IntPtr]::Zero)
         $liveHash=(Get-FileHash -LiteralPath $configPath).Hash
         $contrasts=@()
-        foreach($value in @(0,4,12,24,48)){
+        foreach($value in @(0,1,2,4,12,24,48,0)){
             (Range 'BlurRadiusSlider').SetValue($value)
             $actual=[UIntPtr]::Zero
             for($attempt=0;$attempt -lt 30;$attempt++){
@@ -180,10 +204,15 @@ try{
             }
             if($backend.HasExited -or (Get-Process 'Nocturne.Renderer').Id -ne $backend.Id){throw 'Live radius adjustment restarted the renderer.'}
         }
-        if($MeasureDesktopFixture -and !($contrasts[4] -lt $contrasts[0]*.5 -and $contrasts[2] -lt $contrasts[0]*.9)){throw 'Live UI radius did not change actual desktop pixels.'}
+        if($MeasureDesktopFixture){
+            if([Math]::Abs($contrasts[0]-$plainContrast) -gt .1 -or [Math]::Abs($contrasts[7]-$plainContrast) -gt .1){throw 'Live radius zero must match disabled blur, including after a strong blur.'}
+            if($contrasts[1] -lt $plainContrast*.93){throw 'Live radius one still has an excessive blur floor.'}
+            for($i=1;$i -lt 7;$i++){if($contrasts[$i] -ge $contrasts[$i-1]){throw 'Live desktop blur must increase progressively.'}}
+            if(!($contrasts[6] -lt $contrasts[0]*.5 -and $contrasts[4] -lt $contrasts[0]*.9)){throw 'Live UI radius did not change actual desktop pixels.'}
+        }
         if((Get-FileHash -LiteralPath $configPath).Hash -ne $liveHash){throw 'Live radius preview wrote settings.'}
     }
-    [pscustomobject]@{Passed=$true;FiveRenderedPreviewStates=(!$SkipPreviewPixels);UiSaveBackendRoundTrip=$true;ActualDesktopRadiusVerified=[bool]$MeasureDesktopFixture;LiveUiRadiusVerified=[bool]$LiveRadius;OriginalRadius=(Number $before 'blurRadius')}|ConvertTo-Json -Compress
+    [pscustomobject]@{Passed=$true;FiveRenderedPreviewStates=(!$SkipPreviewPixels);UiSaveBackendRoundTrip=$true;ActualDesktopRadiusVerified=[bool]$MeasureDesktopFixture;ZeroMatchesDisabled=[bool]$MeasureDesktopFixture;OneStartsSlightlyBlurred=[bool]$MeasureDesktopFixture;LiveUiRadiusVerified=[bool]$LiveRadius;OriginalRadius=(Number $before 'blurRadius')}|ConvertTo-Json -Compress
 }
 finally{
     $originalEnabled=if((Number $before 'blurEnabled') -eq 1){[Windows.Automation.ToggleState]::On}else{[Windows.Automation.ToggleState]::Off}

@@ -4,8 +4,8 @@
 102 ICON "../../assets/branding/TrayWhite.ico"
 103 ICON "../../assets/branding/TrayBlack.ico"
 1 VERSIONINFO
-FILEVERSION 0,4,0,0
-PRODUCTVERSION 0,4,0,0
+FILEVERSION 0,6,0,0
+PRODUCTVERSION 0,6,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -14,9 +14,9 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "Penumbra desktop effects"
-            VALUE "FileVersion", "0.4.0.0"
+            VALUE "FileVersion", "0.6.0.0"
             VALUE "ProductName", "Penumbra"
-            VALUE "ProductVersion", "Beta 0.4"
+            VALUE "ProductVersion", "Beta 0.6"
         END
     END
     BLOCK "VarFileInfo"

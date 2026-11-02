@@ -19,12 +19,16 @@
 #include <memory>
 #include "focus_animation.h"
 #include "desktop_blur.h"
+#include "blur_bounds.h"
 #include "branding.h"
+#include "wallpaper_layer.h"
 
 // Event-driven at rest. A short-lived timer exists only during a transition.
 constexpr UINT TrayMessage = WM_APP + 1, ReorderMessage = WM_APP + 2, IconMessage = WM_APP + 3, WindowStateMessage = WM_APP + 4, TrayId = 1;
 constexpr UINT SettingsId = 101, ReloadId = 102, PauseId = 103, ExitId = 104;
-struct Params { double opacity=.68, radius=.48, feather=.65, shape=1, cx=.5, cy=.5, blurRadius=12; int tint=0; bool primary=false, darkenIcons=false, focusOnly=false, blurEnabled=false; };
+constexpr UINT BlurBoundsMessage=WM_APP+5, BlurRadiusMessage=WM_APP+6;
+constexpr UINT ColorValueMessage=WM_APP+7, ColorHostMessage=WM_APP+8;
+struct Params { double opacity=.68, radius=.48, feather=.65, shape=1, cx=.5, cy=.5, blurRadius=12, saturation=40; int tint=0; bool primary=false, darkenIcons=false, focusOnly=false, blurEnabled=false, saturationEnabled=false; };
 struct Bitmap {
     HDC dc{}; HBITMAP handle{}; HGDIOBJ previous{}; uint32_t* pixels{};
     int width=0, height=0;
@@ -67,13 +71,24 @@ bool iconsDirty=false, animationTimerArmed=false;
 bool windowStatePending=false, reorderPending=false, iconPending=false;
 double frameIntervalMs=1000.0/60, detectedRefreshHz=0, nextFrameAt=0;
 focus_animation::Transition transition;
-struct BlurSurface { desktop_blur::Engine::Surface composition; RECT rect{}; };
+struct BlurSurface { desktop_blur::Engine::Surface composition; RECT rect{}, protectedArea{}; bool protectionValid=false; };
 std::unique_ptr<desktop_blur::Engine> blurEngine;
 std::vector<BlurSurface> blurSurfaces;
 focus_animation::Transition blurTransition;
 HANDLE blurAnimationTick{};
 double blurNextFrameAt=0;
 bool blurTimerArmed=false;
+bool blurBoundsPending=false;
+HANDLE blurPreviewProcess{};
+DWORD blurPreviewClient=0;
+struct ColorSurface { desktop_blur::Engine::Surface composition; wallpaper_layer::Layer layer; RECT rect{},safe{}; bool clipped=false; };
+std::vector<ColorSurface> colorSurfaces;
+focus_animation::Transition colorTransition;
+HANDLE colorAnimationTick{},colorPreviewProcess{},wallpaperProcess{};
+DWORD colorPreviewClient=0,colorCaptureClient=0;
+bool colorTimerArmed=false,colorHostPending=false;
+double colorNextFrameAt=0;
+HRESULT colorLastResult=S_OK;
 // Opt-in diagnostics only. Keep samples in memory during the animation and
 // write once at rest, so tracing cannot stall each frame with disk I/O.
 bool traceAnimation=false, traceFileOutput=true;
@@ -152,6 +167,8 @@ void Load() {
     params.focusOnly=ReadNumber(L"focusOnly",0,0,1)==1;
     params.blurEnabled=ReadNumber(L"blurEnabled",0,0,1)==1;
     params.blurRadius=ReadNumber(L"blurRadius",12,0,48);
+    params.saturationEnabled=ReadNumber(L"saturationEnabled",0,0,1)==1;
+    params.saturation=ReadNumber(L"saturation",40,0,100);
     // This user-selected effect must not silently disappear when Windows'
     // unrelated client-area animations are disabled. Never change that setting.
 }
@@ -274,11 +291,26 @@ void StopBlurAnimation() {
     blurTimerArmed=false;
 }
 void ClearBlur() {
+    if(blurPreviewProcess) { CloseHandle(blurPreviewProcess); blurPreviewProcess=nullptr; }
+    blurPreviewClient=0;
     StopBlurAnimation(); blurTransition.Reset(false);
     for(auto& s:blurSurfaces) s.composition.Reset();
     blurSurfaces.clear();
 }
-void Clear() { StopAnimation(); ClearBlur(); FlushFrameTrace(); for(auto& s:surfaces) DropSurface(s); surfaces.clear(); }
+void StopColorAnimation() {
+    if(colorAnimationTick) { CancelWaitableTimer(colorAnimationTick); CloseHandle(colorAnimationTick); colorAnimationTick=nullptr; }
+    colorTimerArmed=false;
+}
+void ClearColor() {
+    StopColorAnimation(); colorTransition.Reset(false);
+    colorCaptureClient=0;if(controller) KillTimer(controller,7);
+    if(colorPreviewProcess) { CloseHandle(colorPreviewProcess); colorPreviewProcess=nullptr; }
+    if(wallpaperProcess) { CloseHandle(wallpaperProcess); wallpaperProcess=nullptr; }
+    colorPreviewClient=0;
+    for(auto& s:colorSurfaces) s.composition.Reset();
+    colorSurfaces.clear();
+}
+void Clear() { StopAnimation(); ClearColor(); ClearBlur(); FlushFrameTrace(); for(auto& s:surfaces) DropSurface(s); surfaces.clear(); }
 bool DesktopPlacementCurrent(HWND window,const RECT& rect) {
     if(!IsWindowVisible(window)||GetWindow(window,GW_OWNER)!=desktop||
        (GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOPMOST)) return false;
@@ -289,7 +321,7 @@ bool DesktopPlacementCurrent(HWND window,const RECT& rect) {
     // even when the requested coordinates and order did not actually change.
     for(HWND below=GetWindow(window,GW_HWNDNEXT);below;below=GetWindow(below,GW_HWNDNEXT)) {
         if(below==desktop) return true;
-        if(IsApplicationWindow(below)) return false;
+        if(IsApplicationWindow(below)||blur_bounds::IsTaskbar(below)) return false;
     }
     return false;
 }
@@ -315,8 +347,20 @@ bool PositionSurface(Surface& s, bool show) {
     // activate the owner, and do not promote the overlay to HWND_TOP on failure.
     return PlaceDesktopPopup(s.hwnd,s.rect,show&&!paused&&!capturingPreview&&(transition.Target()||animationTimerArmed));
 }
+bool ProtectBlurTaskbar(BlurSurface& s) {
+    RECT safe=blur_bounds::DesktopArea(s.rect);
+    if(s.protectionValid&&EqualRect(&safe,&s.protectedArea)) return true;
+    if(!blurEngine||FAILED(blurEngine->Clip(s.composition,s.rect,safe))) return false;
+    HRGN region=CreateRectRgn(safe.left-s.rect.left,safe.top-s.rect.top,safe.right-s.rect.left,safe.bottom-s.rect.top);
+    if(!region) return false;
+    if(!SetWindowRgn(s.composition.hwnd,region,FALSE)) { DeleteObject(region); return false; }
+    // SetWindowRgn owns the region on success. Both HWND and visual are clipped.
+    s.protectedArea=safe; s.protectionValid=true;
+    return true;
+}
 bool PositionBlurSurfaces() {
     for(auto& s:blurSurfaces) {
+        if(!ProtectBlurTaskbar(s)) { ShowWindow(s.composition.hwnd,SW_HIDE); return false; }
         HWND window=s.composition.hwnd;
         // Reinsert LAST at the bottom: blur stays below our vignette and above
         // its desktop owner, never above ordinary apps. No foreign HWND anchor.
@@ -324,16 +368,33 @@ bool PositionBlurSurfaces() {
     }
     return true;
 }
+bool SetLiveBlurRadius(float radius) {
+    if(!params.blurEnabled||!blurEngine||blurSurfaces.empty()) return false;
+    float previous=blurSurfaces.front().composition.radius;
+    for(auto& s:blurSurfaces) if(FAILED(blurEngine->SetRadius(s.composition,radius))) {
+        for(auto& rollback:blurSurfaces) blurEngine->SetRadius(rollback.composition,previous);
+        return false;
+    }
+    return true;
+}
+void EndBlurRadiusPreview() {
+    SetLiveBlurRadius(static_cast<float>(params.blurRadius));
+    if(blurPreviewProcess) { CloseHandle(blurPreviewProcess); blurPreviewProcess=nullptr; }
+    blurPreviewClient=0;
+}
 void FailBlur() {
     ClearBlur();
     Status(L"桌面模糊不可用 · 已安全关闭模糊，暗角不受影响");
 }
 void RefreshBlurPolicy(HWND hwnd) {
-    if(!params.blurEnabled) return;
+    if(!params.blurEnabled&&!params.saturationEnabled) return;
     bool allowed=desktop_blur::TransparencyAllowed();
     if(allowed==blurPolicyAllowed) return;
     blurPolicyAllowed=allowed;
-    if(!allowed) FailBlur();
+    if(!allowed) {
+        ClearBlur(); ClearColor();
+        Status(L"Windows 已关闭透明效果或开启高对比度 · 模糊与降饱和度已安全停用，暗角保留");
+    }
     else SetTimer(hwnd,2,250,nullptr);
 }
 void AdvanceBlurAnimation() {
@@ -374,6 +435,101 @@ void SetBlurVisibility(bool visible) {
 bool WantsDesktopBlur(bool enabled,bool isPaused,bool hasWindows,ForegroundKind kind,bool previousTarget=false) {
     return enabled&&!isPaused&&hasWindows&&
         (kind==ForegroundKind::Application||(kind==ForegroundKind::Transient&&previousTarget));
+}
+bool PositionColorSurfaces() {
+    for(auto& s:colorSurfaces) {
+        RECT safe=blur_bounds::DesktopArea(s.rect);
+        if(!s.clipped||!EqualRect(&s.safe,&safe)) {
+            if(!blurEngine||FAILED(blurEngine->Clip(s.composition,s.rect,safe))) return false;
+            HRGN region=CreateRectRgn(safe.left-s.rect.left,safe.top-s.rect.top,safe.right-s.rect.left,safe.bottom-s.rect.top);
+            if(!region) return false;
+            if(!SetWindowRgn(s.composition.hwnd,region,FALSE)) { DeleteObject(region); return false; }
+            s.safe=safe; s.clipped=true;
+        }
+        if(!wallpaper_layer::Place(s.composition.hwnd,s.layer,s.rect,!paused&&!capturingPreview&&!colorCaptureClient&&s.composition.radius<1&&(colorTransition.Target()||colorTimerArmed))) return false;
+    }
+    return true;
+}
+void AdvanceColorAnimation() {
+    double now=ClockMs(); bool running=colorTransition.Running(now);
+    float value=static_cast<float>(running?colorTransition.Value(now):(colorTransition.Target()?1:0));
+    for(auto& s:colorSurfaces) if(FAILED(s.composition.visual->put_Opacity(value))) { ClearColor(); return; }
+    if(!running) {
+        colorTransition.Reset(colorTransition.Target()); StopColorAnimation();
+        if(!PositionColorSurfaces()) ClearColor();
+        return;
+    }
+    do { colorNextFrameAt+=frameIntervalMs; } while(colorNextFrameAt<=now);
+    LARGE_INTEGER due{}; due.QuadPart=-(LONGLONG)std::max(1.0,10000*std::min(colorNextFrameAt-now,colorTransition.Remaining(now)));
+    if(!SetWaitableTimer(colorAnimationTick,&due,0,nullptr,nullptr,FALSE)) ClearColor();
+}
+void SetColorVisibility(bool visible) {
+    visible=visible&&params.saturationEnabled&&!paused&&wallpaperProcess;
+    if(colorSurfaces.empty()||visible==colorTransition.Target()) return;
+    double now=ClockMs(); if(!colorTransition.Retarget(visible,now)) return;
+    if(!colorTimerArmed) {
+        colorAnimationTick=CreateWaitableTimerExW(nullptr,nullptr,0x00000002,TIMER_ALL_ACCESS);
+        if(!colorAnimationTick) colorAnimationTick=CreateWaitableTimerW(nullptr,FALSE,nullptr);
+        colorTimerArmed=colorAnimationTick!=nullptr;
+        if(!colorTimerArmed) { ClearColor(); return; }
+    }
+    for(auto& s:colorSurfaces) if(FAILED(s.composition.visual->put_Opacity(static_cast<float>(colorTransition.Value(now))))) { ClearColor(); return; }
+    if(!PositionColorSurfaces()) { ClearColor(); return; }
+    colorNextFrameAt=now; AdvanceColorAnimation();
+}
+bool SetLiveSaturation(float percentage) {
+    if(!params.saturationEnabled||!blurEngine||colorSurfaces.empty()) return false;
+    float value=std::isfinite(percentage)?std::clamp(percentage,0.f,100.f)/100:1.f;
+    float previous=colorSurfaces.front().composition.radius;
+    for(auto& s:colorSurfaces) if(FAILED(blurEngine->SetRadius(s.composition,value))) {
+        for(auto& rollback:colorSurfaces) blurEngine->SetRadius(rollback.composition,previous);
+        return false;
+    }
+    return PositionColorSurfaces();
+}
+void EndSaturationPreview() {
+    SetLiveSaturation(static_cast<float>(params.saturation));
+    if(colorPreviewProcess) { CloseHandle(colorPreviewProcess); colorPreviewProcess=nullptr; }
+    colorPreviewClient=0;
+}
+bool RefreshColorLayers() {
+    colorLastResult=S_OK;
+    if(!params.saturationEnabled||paused) { ClearColor(); return true; }
+    auto layers=wallpaper_layer::Find();
+    std::vector<ColorSurface> desired;
+    for(const auto& layer:layers) for(const auto& monitor:surfaces) {
+        RECT rect{};
+        if(IntersectRect(&rect,&layer.bounds,&monitor.rect)) { ColorSurface s;s.layer=layer;s.rect=rect;desired.push_back(std::move(s)); }
+    }
+    bool same=!desired.empty()&&desired.size()==colorSurfaces.size()&&wallpaperProcess&&WaitForSingleObject(wallpaperProcess,0)==WAIT_TIMEOUT;
+    if(same) for(size_t i=0;i<desired.size();i++) {
+        auto& a=desired[i];auto& b=colorSurfaces[i];
+        if(a.layer.wallpaper!=b.layer.wallpaper||a.layer.host!=b.layer.host||a.layer.pid!=b.layer.pid||!EqualRect(&a.rect,&b.rect)||!IsWindow(b.composition.hwnd)) { same=false;break; }
+    }
+    if(same) {
+        if(PositionColorSurfaces()) return true;
+        ClearColor(); colorLastResult=E_FAIL; return false;
+    }
+    ClearColor();
+    if(desired.empty()) return true; // Waiting for a supported WE desktop.
+    if(!desktop_blur::TransparencyAllowed()) { colorLastResult=HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);return false; }
+    wallpaperProcess=wallpaper_layer::OpenEngine(desired.front().layer.pid);
+    if(!wallpaperProcess) return true;
+    if(!blurEngine) blurEngine=std::make_unique<desktop_blur::Engine>();
+    for(auto& s:desired) {
+        // A non-layered child target is required here. It stays INSIDE the
+        // wallpaper-only Explorer branch, below icons, apps and the taskbar.
+        POINT origin{s.rect.left,s.rect.top};ScreenToClient(s.layer.host,&origin);
+        s.composition.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE,
+            L"Nocturne.ColorSurface",L"Penumbra wallpaper color",WS_CHILD|WS_CLIPSIBLINGS,origin.x,origin.y,
+            s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,s.layer.host,nullptr,instance,nullptr);
+        HRESULT hr=s.composition.hwnd?blurEngine->Attach(s.composition.hwnd,s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,
+            static_cast<float>(params.saturation/100),s.composition,desktop_blur::Filter::Saturation):HRESULT_FROM_WIN32(GetLastError());
+        if(FAILED(hr)) { s.composition.Reset();ClearColor();colorLastResult=hr;return false; }
+        colorSurfaces.push_back(std::move(s));
+    }
+    if(!PositionColorSurfaces()) { ClearColor();colorLastResult=E_FAIL;return false; }
+    return true;
 }
 BOOL CALLBACK CollectMonitor(HMONITOR monitor,HDC,LPRECT,LPARAM data) {
     MONITORINFOEXW info{}; info.cbSize=sizeof(info);
@@ -507,19 +663,21 @@ void SetVisibility(bool visible,bool animate=true) {
 void UpdateWindowState() {
     TraceWindowState("windows");
     if(paused) return;
-    if(!params.focusOnly&&!params.blurEnabled) return;
+    if(!params.focusOnly&&!params.blurEnabled&&!params.saturationEnabled) return;
     bool hasWindows=HasApplicationWindow();
     if(params.focusOnly) SetVisibility(hasWindows);
     HWND foreground=GetForegroundWindow();
     ForegroundKind kind=ClassifyForeground(foreground);
     if(kind==ForegroundKind::Application&&!IsApplicationWindow(GetAncestor(foreground,GA_ROOT))) kind=ForegroundKind::Transient;
     SetBlurVisibility(WantsDesktopBlur(params.blurEnabled,paused,hasWindows,kind,blurTransition.Target()));
+    SetColorVisibility(WantsDesktopBlur(params.saturationEnabled,paused,hasWindows,kind,colorTransition.Target()));
 }
 void QueueOnce(UINT message,bool& pending) {
     if(!pending) pending=PostMessageW(controller,message,0,0)!=FALSE;
 }
 bool Rebuild() {
     Clear(); transition.Reset(false);
+    blurPolicyAllowed=desktop_blur::TransparencyAllowed();
     if(paused) { Status(L"桌面效果已暂停 · 可从托盘恢复"); return true; }
     if(!LocateDesktop()) { Status(L"未找到桌面宿主 · 已安全隐藏，将自动重试"); return false; }
     IconMask fresh;
@@ -556,6 +714,7 @@ bool Rebuild() {
             else hr=blurEngine->Attach(s.composition.hwnd,r.right-r.left,r.bottom-r.top,static_cast<float>(params.blurRadius),s.composition);
             if(FAILED(hr)) { s.composition.Reset(); ClearBlur(); break; }
             blurSurfaces.push_back(std::move(s));
+            if(!ProtectBlurTaskbar(blurSurfaces.back())) { hr=E_FAIL; ClearBlur(); break; }
         }
         if(FAILED(hr)) {
             wchar_t error[100]; swprintf(error,100,L" · 模糊不可用（0x%08lX），暗角保留",static_cast<unsigned long>(hr));
@@ -563,9 +722,15 @@ bool Rebuild() {
         } else {
             UpdateWindowState();
             wchar_t appliedRadius[96];
-            swprintf(appliedRadius,96,L" · 模糊附加半径 %.0f px · 应用获焦时模糊，点击桌面恢复清晰",params.blurRadius);
+            swprintf(appliedRadius,96,L" · 模糊半径 %.0f px · 应用获焦时模糊，点击桌面恢复清晰",params.blurRadius);
             message+=appliedRadius;
         }
+    }
+    if(params.saturationEnabled) {
+        if(!RefreshColorLayers()) message+=L" · 壁纸降饱和度不可用，其他效果保留";
+        else if(colorSurfaces.empty()) message+=L" · 降饱和度待命（等待 Wallpaper Engine 壁纸）";
+        else { wchar_t text[64];swprintf(text,64,L" · 壁纸保留饱和度 %.0f%%",params.saturation);message+=text; }
+        UpdateWindowState();
     }
     Status(message.c_str()); return true;
 }
@@ -573,10 +738,15 @@ void OpenSettings() {
     wchar_t exe[32768]; GetModuleFileNameW(nullptr,exe,32768);
     std::wstring path=exe; path=path.substr(0,path.find_last_of(L"\\/")+1)+L"Penumbra.exe";
     if(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
-        MessageBoxW(nullptr,L"无法打开设置。请保持 Penumbra.exe 与原生程序位于同一文件夹。",L"Penumbra 半影",MB_OK|MB_ICONERROR);
+        MessageBoxW(nullptr,L"无法打开设置。请保持 Penumbra.exe 与原生程序位于同一文件夹。",L"Penumbra",MB_OK|MB_ICONERROR);
 }
-void AddTray() {
-    trayIcon.Update(instance,controller,TrayId,TrayMessage,true);
+bool AddTray() {
+    bool added=trayIcon.Update(instance,controller,TrayId,TrayMessage,true);
+    if(added) {
+        HANDLE ready=OpenEventW(EVENT_MODIFY_STATE,FALSE,L"Local\\Penumbra.TrayReady.v1");
+        if(ready) { SetEvent(ready);CloseHandle(ready); }
+    }
+    return added;
 }
 void Menu() {
     HMENU menu=CreatePopupMenu(); AppendMenuW(menu,MF_STRING,SettingsId,L"打开设置");
@@ -597,6 +767,11 @@ LRESULT CALLBACK SurfaceProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
 void CALLBACK DesktopEvent(HWINEVENTHOOK hook,DWORD event,HWND hwnd,LONG object,LONG,DWORD,DWORD) {
+    if(params.saturationEnabled&&object==OBJID_WINDOW&&hwnd&&
+       (wallpaper_layer::IsWallpaper(hwnd)||std::any_of(colorSurfaces.begin(),colorSurfaces.end(),[&](const ColorSurface& s){return s.layer.wallpaper==hwnd||s.layer.host==hwnd;})))
+        QueueOnce(ColorHostMessage,colorHostPending);
+    if(object==OBJID_WINDOW&&hwnd&&blur_bounds::IsTaskbar(hwnd))
+        QueueOnce(BlurBoundsMessage,blurBoundsPending);
     if(event==EVENT_SYSTEM_FOREGROUND) {
         QueueOnce(WindowStateMessage,windowStatePending);
         QueueOnce(ReorderMessage,reorderPending);
@@ -621,10 +796,56 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(capturingPreview) SetTimer(hwnd,4,3000,nullptr); else KillTimer(hwnd,4);
         for(auto& s:surfaces) PositionSurface(s,true);
         PositionBlurSurfaces();
+        if(!PositionColorSurfaces()) ClearColor();
         return 1;
     }
     if(taskbarCreated && msg==taskbarCreated) { AddTray(); SetTimer(hwnd,2,1500,nullptr); return 0; }
     switch(msg) {
+    case ColorHostMessage:
+        colorHostPending=false;SetTimer(hwnd,6,100,nullptr);return 0;
+    case ColorValueMessage: {
+        DWORD client=static_cast<DWORD>(lp);
+        if(wp==104) {
+            if(!client||colorSurfaces.empty()) return 0;
+            colorCaptureClient=client;SetTimer(hwnd,7,3000,nullptr);
+            if(!PositionColorSurfaces()) { ClearColor();return 0; }
+            return 1;
+        }
+        if(wp==105) {
+            if(client==colorCaptureClient) {
+                colorCaptureClient=0;KillTimer(hwnd,7);
+                if(!PositionColorSurfaces()) ClearColor();
+            }
+            return 1;
+        }
+        if(wp==101) { if(client==colorPreviewClient) EndSaturationPreview();return 1; }
+        if(wp==102) return colorSurfaces.empty()?0:static_cast<LRESULT>(std::lround(colorSurfaces.front().composition.radius*100)+1);
+        if(wp==103) return (wallpaperProcess?8:0)|(colorTransition.Target()?1:0)|(colorTimerArmed?2:0)|
+            (!colorSurfaces.empty()&&IsWindowVisible(colorSurfaces.front().composition.hwnd)?4:0);
+        if(wp>100||!client||colorSurfaces.empty()) return 0;
+        if(colorPreviewClient!=client) {
+            HANDLE process=OpenProcess(SYNCHRONIZE,FALSE,client);if(!process) return 0;
+            EndSaturationPreview();colorPreviewProcess=process;colorPreviewClient=client;
+        }
+        return SetLiveSaturation(static_cast<float>(wp))?static_cast<LRESULT>(wp+1):0;
+    }
+    case BlurBoundsMessage:
+        blurBoundsPending=false;
+        if(!PositionBlurSurfaces()) FailBlur();
+        if(!PositionColorSurfaces()) ClearColor();
+        return 0;
+    case BlurRadiusMessage: {
+        DWORD client=static_cast<DWORD>(lp);
+        if(wp==49) { if(client==blurPreviewClient) EndBlurRadiusPreview(); return 1; }
+        if(wp==50) return blurSurfaces.empty()?0:static_cast<LRESULT>(std::lround(blurSurfaces.front().composition.radius)+1);
+        if(wp>48||!client||blurSurfaces.empty()) return 0;
+        if(blurPreviewClient!=client) {
+            HANDLE process=OpenProcess(SYNCHRONIZE,FALSE,client);
+            if(!process) return 0;
+            EndBlurRadiusPreview(); blurPreviewProcess=process; blurPreviewClient=client;
+        }
+        return SetLiveBlurRadius(static_cast<float>(wp))?static_cast<LRESULT>(wp+1):0;
+    }
     case ReorderMessage: reorderPending=false; SetTimer(hwnd,3,60,nullptr); return 0;
     case WindowStateMessage: windowStatePending=false; UpdateWindowState(); return 0;
     case IconMessage:
@@ -643,14 +864,14 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         // Theme, animation preference and unrelated app broadcasts do not
         // change our mask. Rebuilding for all of them cancelled live fades.
         if(wp==SPI_SETWORKAREA||wp==SPI_SETICONMETRICS) SetTimer(hwnd,2,700,nullptr);
-        if(params.blurEnabled&&(wp==SPI_SETHIGHCONTRAST||(lp&&wcscmp(reinterpret_cast<const wchar_t*>(lp),L"ImmersiveColorSet")==0))) {
+        if((params.blurEnabled||params.saturationEnabled)&&(wp==SPI_SETHIGHCONTRAST||(lp&&wcscmp(reinterpret_cast<const wchar_t*>(lp),L"ImmersiveColorSet")==0))) {
             RefreshBlurPolicy(hwnd);
         }
         return 0;
     case WM_DWMCOMPOSITIONCHANGED:
         // Keep a valid surface until recovery actually runs. Do not introduce
         // a guaranteed clear frame before a delayed rebuild.
-        if(params.blurEnabled) SetTimer(hwnd,2,250,nullptr);
+        if(params.blurEnabled||params.saturationEnabled) SetTimer(hwnd,2,250,nullptr);
         return 0;
     case WM_THEMECHANGED:
         trayIcon.Update(instance,controller,TrayId,TrayMessage);
@@ -664,6 +885,7 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             KillTimer(hwnd,4); capturingPreview=false;
             for(auto& s:surfaces) PositionSurface(s,true);
             PositionBlurSurfaces();
+            if(!PositionColorSurfaces()) ClearColor();
         }
         else if(wp==5) {
             KillTimer(hwnd,5);
@@ -681,6 +903,8 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
         }
         else if(wp==2) { KillTimer(hwnd,2); Rebuild(); }
+        else if(wp==6) { KillTimer(hwnd,6);RefreshColorLayers();UpdateWindowState(); }
+        else if(wp==7) { KillTimer(hwnd,7);colorCaptureClient=0;if(!PositionColorSurfaces()) ClearColor(); }
         else if(wp==1 && !paused) {
             HWND previous=desktop;
             bool intact=LocateDesktop() && previous==desktop && !surfaces.empty();
@@ -693,12 +917,14 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
                 UpdateWindowState();
                 for(auto& s:surfaces) PositionSurface(s,true);
                 PositionBlurSurfaces();
+                if(params.saturationEnabled) { RefreshColorLayers();UpdateWindowState(); }
             }
         }
         else if(wp==3) {
             KillTimer(hwnd,3);
             for(auto& s:surfaces) PositionSurface(s, true);
             PositionBlurSurfaces();
+            if(!PositionColorSurfaces()) ClearColor();
         }
         return 0;
     case WM_QUERYENDSESSION: return TRUE;
@@ -739,15 +965,23 @@ int SelfTest() {
     return 0;
 }
 bool DispatchWork(DWORD timeout=INFINITE) {
-    HANDLE events[4]{stopEvent,reloadEvent};
-    DWORD count=2,darkIndex=MAXDWORD,blurIndex=MAXDWORD;
+    HANDLE events[8]{stopEvent,reloadEvent};
+    DWORD count=2,darkIndex=MAXDWORD,blurIndex=MAXDWORD,previewIndex=MAXDWORD,colorIndex=MAXDWORD,colorPreviewIndex=MAXDWORD,wallpaperIndex=MAXDWORD;
     if(animationTimerArmed) { darkIndex=count; events[count++]=animationTick; }
     if(blurTimerArmed) { blurIndex=count; events[count++]=blurAnimationTick; }
+    if(blurPreviewProcess) { previewIndex=count; events[count++]=blurPreviewProcess; }
+    if(colorTimerArmed) { colorIndex=count;events[count++]=colorAnimationTick; }
+    if(colorPreviewProcess) { colorPreviewIndex=count;events[count++]=colorPreviewProcess; }
+    if(wallpaperProcess) { wallpaperIndex=count;events[count++]=wallpaperProcess; }
     DWORD wait=MsgWaitForMultipleObjectsEx(count,events,timeout,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
     if(wait==WAIT_OBJECT_0||wait==WAIT_FAILED) return false;
     if(wait==WAIT_OBJECT_0+1) { paused=false; Load(); Rebuild(); }
     if(darkIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+darkIndex) AdvanceAnimation();
     if(blurIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+blurIndex) AdvanceBlurAnimation();
+    if(previewIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+previewIndex) EndBlurRadiusPreview();
+    if(colorIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorIndex) AdvanceColorAnimation();
+    if(colorPreviewIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorPreviewIndex) EndSaturationPreview();
+    if(wallpaperIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+wallpaperIndex) ClearColor();
     if(wait==WAIT_OBJECT_0+count) {
         MSG msg; unsigned messages=0;
         while(messages++<32&&PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
@@ -759,10 +993,15 @@ bool DispatchWork(DWORD timeout=INFINITE) {
 }
 int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     if(wcsstr(args,L"--self-test")) return SelfTest();
+    const bool trayOnly=wcsstr(args,L"--tray-only")!=nullptr;
     instance=app; SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     HANDLE mutex=CreateMutexW(nullptr,TRUE,L"Local\\Nocturne.Renderer.v1");
     if(!mutex) return 2;
     if(GetLastError()==ERROR_ALREADY_EXISTS) {
+        if(trayOnly) {
+            // Closing settings must never reload, unpause or replay effects.
+            CloseHandle(mutex);return 0;
+        }
         // Wait briefly for the first instance to publish its event handles.
         for(int i=0;i<30;i++) { HANDLE event=OpenEventW(EVENT_MODIFY_STATE,FALSE,L"Local\\Nocturne.Reload.v1");
             if(event) { SetEvent(event); CloseHandle(event); CloseHandle(mutex); return 0; } Sleep(50); }
@@ -774,6 +1013,7 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     if(!stopEvent||!reloadEvent||!appliedEvent) { CloseHandle(mutex); return 4; }
     WNDCLASSW wc{}; wc.hInstance=app; wc.hIcon=LoadIconW(app,MAKEINTRESOURCEW(branding::AppIcon)); wc.lpfnWndProc=SurfaceProc; wc.lpszClassName=L"Nocturne.Surface"; RegisterClassW(&wc);
     wc.lpszClassName=L"Nocturne.BlurSurface"; RegisterClassW(&wc);
+    wc.lpszClassName=L"Nocturne.ColorSurface"; RegisterClassW(&wc);
     wc.lpfnWndProc=ControllerProc; wc.lpszClassName=L"Nocturne.Controller"; RegisterClassW(&wc);
     controller=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,wc.lpszClassName,L"Nocturne Controller",WS_POPUP,0,0,0,0,nullptr,nullptr,app,nullptr);
     if(!controller) { Status(L"无法创建后台控制窗口"); return 5; }
@@ -785,17 +1025,22 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
         if(file) { std::fputs("qpcMs,target,visibility,scale,opacity,windowVisible,submitMs\n",file); std::fclose(file); }
     }
     SetPriorityClass(GetCurrentProcess(),NORMAL_PRIORITY_CLASS);
-    AddTray(); Load();
+    if(!AddTray()&&trayOnly) {
+        DestroyWindow(controller);CloseHandle(stopEvent);CloseHandle(reloadEvent);CloseHandle(appliedEvent);CloseHandle(mutex);return 6;
+    }
+    paused=trayOnly;
+    Load();
     foregroundHook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     minimizeHook=SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART,EVENT_SYSTEM_MINIMIZEEND,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     windowHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_HIDE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     cloakHook=SetWinEventHook(EVENT_OBJECT_CLOAKED,EVENT_OBJECT_UNCLOAKED,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     reorderHook=SetWinEventHook(EVENT_OBJECT_REORDER,EVENT_OBJECT_REORDER,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     iconHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_NAMECHANGE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
-    if((!windowHook||!foregroundHook)&&params.blurEnabled) {
+    if((!windowHook||!foregroundHook)&&(params.blurEnabled||params.saturationEnabled)) {
         params.blurEnabled=false;
+        params.saturationEnabled=false;
         Rebuild();
-        Status(L"窗口事件监听失败 · 已关闭自动模糊，暗角保留");
+        Status(L"窗口事件监听失败 · 已关闭自动模糊和降饱和度，暗角保留");
     } else if(!windowHook&&params.focusOnly) {
         Status(L"无法监听应用窗口 · 未启用暗角，请重新启动后台");
     } else { Rebuild(); UpdateWindowState(); }

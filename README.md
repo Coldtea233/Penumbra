@@ -1,6 +1,6 @@
 <div align=center>
-  <img src="https://github.com/user-attachments/assets/91902d92-a3a5-40fd-aad5-cf7a2f0f0516" width=180 />
-<h1>Penumbra · 半影</h1>
+  <img src="assets/branding/AppIcon.png" width=180 />
+<h1>Penumbra</h1>
 
 **为你的桌面添加暗角与模糊，将专注留给前台窗口**
 <div>
@@ -26,7 +26,7 @@
 
 ## 性能报告
 
-以下数值来自历史暗角路径测试，不代表开启 Beta 0.4 实时模糊后的整机成本。动态模糊还消耗 DWM/GPU 与系统合成内存，具体已测范围见验证记录。
+以下数值来自历史暗角路径测试，不代表开启 Beta 0.6 实时模糊或降饱和度后的整机成本。动态滤镜还消耗 DWM/GPU 与系统合成内存，具体已测范围见验证记录。
 
 - **测试平台**：i5-12500H (2.50 GHz) / RTX 3050 Laptop（4GB VRAM）/ RAM：16GB / 2880×1620、120 Hz
 - **性能表现**: 后台静止：整机 CPU 约 0.02%，工作集约 28.5 MiB，私有内存约 1.6 MiB。
@@ -49,17 +49,17 @@ Windows 合成器另持有每屏透明表面；3840×2160 的 32 位表面约 31
 ./build.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 # 生成内部 Windows Installer 载荷，再打包为对外发布的 EXE
 ./installer/build-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
-./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-Beta-0.4/Penumbra-Beta-0.4-Setup-x64.msi' -OutputDirectory './dist/release-Beta-0.4' -IconPath './assets/branding/AppIcon.ico'
+./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-Beta-0.6/Penumbra-Beta-0.6-r1-Setup-x64.msi' -OutputDirectory './dist/release-Beta-0.6' -IconPath './assets/branding/AppIcon.ico'
 # 原生动画、图标保护、快速反向和资源释放测试，不操作现有应用窗口
 ./tests/run.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 ```
 
-程序产物为 `dist\Penumbra-Beta-0.4` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-Beta-0.4\Penumbra-Beta-0.4-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
+程序产物为 `dist\Penumbra-Beta-0.6` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-Beta-0.6\Penumbra-Beta-0.6-r1-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
 
 ## 发行目录
 
 ```text
-Penumbra-Beta-0.4/
+Penumbra-Beta-0.6/
   Penumbra.exe   启动入口（启动界面后立即退出，不常驻）
   README.md      使用说明
   app/           程序本体、后台、全部 DLL、语言和头像资源

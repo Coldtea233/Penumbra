@@ -4,12 +4,15 @@ using System.Runtime.InteropServices;
 namespace Nocturne;
 public partial class App : Application
 {
+    private const string SettingsIdentity = "Penumbra.Settings.Beta0.6";
     private Window? window;
     private Mutex? instance;
     public App()
     {
-        UnhandledException += (_, e) => Log(e.Exception);
+        StartupCheck.Stage("App constructor");
+        UnhandledException += (_, e) => { StartupCheck.Failed(e.Exception); Log(e.Exception); };
         InitializeComponent();
+        StartupCheck.Stage("App XAML loaded");
     }
     private static void Log(Exception e)
     {
@@ -17,23 +20,45 @@ public partial class App : Application
     }
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
-        instance = new Mutex(true, @"Local\VignFinder.Settings.v3", out bool first);
+        StartupCheck.Stage("OnLaunched");
+        // Older builds used a shared mutex and the same title. An open older
+        // settings window could silently intercept launching this upgrade.
+        instance = new Mutex(true, StartupCheck.Isolated ? @"Local\Penumbra.StartupCheck." + Environment.ProcessId : @"Local\" + SettingsIdentity, out bool first);
+        StartupCheck.Stage("Singleton first=" + first);
         if (!first)
         {
-            var hwnd = FindWindow(null, "Penumbra");
-            if (hwnd == IntPtr.Zero) hwnd = FindWindow(null, "Penumbra 半影"); // An older settings build may still own the mutex.
+            IntPtr hwnd = IntPtr.Zero;
+            for (int retry = 0; retry < 20 && hwnd == IntPtr.Zero; retry++)
+            {
+                EnumWindows((candidate, _) =>
+                {
+                    if (GetProp(candidate, SettingsIdentity) == IntPtr.Zero) return true;
+                    hwnd = candidate;
+                    return false;
+                }, IntPtr.Zero);
+                if (hwnd == IntPtr.Zero) Thread.Sleep(50);
+            }
             if (hwnd != IntPtr.Zero) { ShowWindow(hwnd, 9); SetForegroundWindow(hwnd); }
+            else MessageBox(IntPtr.Zero, "已有 Beta 0.6 设置进程，但暂时无法找到窗口。请关闭该设置进程后重试。", "Penumbra", 0x10);
             Exit();
             return;
         }
         try
         {
-            window = new MainWindow();
+            var main = new MainWindow();
+            window = main;
+            SetProp(WinRT.Interop.WindowNative.GetWindowHandle(main), SettingsIdentity, (IntPtr)1);
             window.Activate();
+            StartupCheck.Stage("Window activated");
+            if (StartupCheck.Enabled) StartupCheck.Run(main);
         }
-        catch (Exception e) { Log(e); throw; }
+        catch (Exception e) { StartupCheck.Failed(e); Log(e); throw; }
     }
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string? className, string title);
+    private delegate bool EnumWindowCallback(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowCallback callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetProp(IntPtr window, string name);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern bool SetProp(IntPtr window, string name, IntPtr value);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int MessageBox(IntPtr window, string text, string caption, uint type);
     [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr hwnd, int command);
 }

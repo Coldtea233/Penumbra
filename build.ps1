@@ -1,4 +1,4 @@
-param([string]$Toolchain = $env:LLVM_MINGW_ROOT, [string]$Configuration = 'Release', [string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist\Penumbra-Beta-0.4'))
+param([string]$Toolchain = $env:LLVM_MINGW_ROOT, [string]$Configuration = 'Release', [string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist\Penumbra-Beta-0.6'), [switch]$NoRestore, [switch]$SkipStartupCheck)
 $ErrorActionPreference = 'Stop'
 if (-not $Toolchain) { throw '请通过 -Toolchain 指定 llvm-mingw 工具链目录，或设置 LLVM_MINGW_ROOT。' }
 $Toolchain = (Resolve-Path -LiteralPath $Toolchain).Path
@@ -24,10 +24,31 @@ try {
     if ($LASTEXITCODE) { throw '原生程序编译失败' }
     Remove-Item -LiteralPath renderer.res
 } finally { Pop-Location }
-& dotnet publish (Join-Path $projectRoot 'src\Nocturne.UI\Nocturne.UI.csproj') -c $Configuration -p:Platform=x64 -o $appDirectory
-if ($LASTEXITCODE) { throw 'WinUI 3 编译失败' }
+$penumbraPreviousGcServer=$env:DOTNET_gcServer
+$env:DOTNET_gcServer='0'
+try {
+    # WinUI + ILLink incremental output can retain an old .deps.json even
+    # after new assemblies were copied. Publish one clean, consistent closure.
+    & dotnet clean (Join-Path $projectRoot 'src\Nocturne.UI\Nocturne.UI.csproj') -c $Configuration -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -v:quiet
+    if ($LASTEXITCODE) { throw '清理 WinUI 编译缓存失败' }
+    [string[]]$restoreOptions=if($NoRestore){@('--no-restore')}else{@()}
+    & dotnet publish (Join-Path $projectRoot 'src\Nocturne.UI\Nocturne.UI.csproj') -c $Configuration -p:Platform=x64 -p:UseSharedCompilation=false -p:BuildInParallel=false -m:1 -o $appDirectory @restoreOptions
+    if ($LASTEXITCODE) { throw 'WinUI 3 编译失败' }
+} finally { $env:DOTNET_gcServer=$penumbraPreviousGcServer }
 $test = Start-Process (Join-Path $appDirectory 'Nocturne.Renderer.exe') -ArgumentList '--self-test' -PassThru -Wait -WindowStyle Hidden
 if ($test.ExitCode) { throw "暗角公式测试失败: $($test.ExitCode)" }
+if (!$SkipStartupCheck) {
+    $testDirectory=Join-Path $projectRoot 'tests\bin'
+    New-Item -ItemType Directory -Force -Path $testDirectory | Out-Null
+    $startupReport=Join-Path $testDirectory ('PublishedStartup-'+[Guid]::NewGuid().ToString('N')+'.txt')
+    $startup=Start-Process -FilePath (Join-Path $appDirectory 'Penumbra.exe') -ArgumentList ('"--startup-check='+$startupReport+'"') -PassThru -WindowStyle Hidden
+    if (!$startup.WaitForExit(15000)) { throw "界面启动检查超时：$startupReport" }
+    if ($startup.ExitCode -or !(Test-Path -LiteralPath $startupReport) -or (Get-Content -LiteralPath $startupReport -First 1) -ne 'PASS') {
+        if (Test-Path -LiteralPath $startupReport) { Get-Content -LiteralPath $startupReport | Write-Host }
+        throw "发布包界面启动检查失败：$startupReport"
+    }
+    Write-Host '发布包 WinUI 启动检查通过。'
+} else { Write-Warning '已跳过发布包 WinUI 启动检查；此构建尚未验证可启动。' }
 Copy-Item (Join-Path $projectRoot 'README.md') $dist
 Copy-Item (Join-Path $projectRoot 'TEST-REPORT.md') $docsDirectory
 Copy-Item (Join-Path $projectRoot 'RELEASE-NOTES.md') $docsDirectory

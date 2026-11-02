@@ -1,6 +1,6 @@
 # EXE installer
 
-Public downloads use `Penumbra-Beta-0.4-Setup-x64.exe`, a statically linked x64
+Public downloads use `Penumbra-Beta-0.6-r1-Setup-x64.exe`, a statically linked x64
 bootstrapper with the complete compressed Windows Installer payload embedded as
 a resource. This is not a renamed MSI and does not download anything at runtime.
 

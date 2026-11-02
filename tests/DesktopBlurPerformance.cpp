@@ -56,6 +56,9 @@ int main() {
     HWND hit=WindowFromPoint(point); bool clickThrough=true;
     for(const auto& s:blurSurfaces) if(hit==s.composition.hwnd) clickThrough=false;
     start=ClockMs(); cpu=CpuMs(); PumpFor(12000); Result("VisibleIdle",ClockMs()-start,CpuMs()-cpu);
+    bool zero=SetLiveBlurRadius(0); PumpFor(250);
+    start=ClockMs(); cpu=CpuMs(); PumpFor(5000); Result("ZeroRadiusIdle",ClockMs()-start,CpuMs()-cpu);
+    zero=zero&&SetLiveBlurRadius(12);
     start=ClockMs();cpu=CpuMs();
     for(int i=0;i<3;i++) { SetBlurVisibility(false);PumpFor(settle);SetBlurVisibility(true);PumpFor(settle); }
     Result("SixTransitions",ClockMs()-start,CpuMs()-cpu);
@@ -68,5 +71,5 @@ int main() {
     bool foreground=GetForegroundWindow()==originalForeground;
     std::printf("{\"VisibleAtRest\":%s,\"ClickThrough\":%s,\"ReversalContinuous\":%s,\"HiddenAtRest\":%s,\"ForegroundPreserved\":%s,\"ScreenWidth\":%d,\"ScreenHeight\":%d}\n",
         visible?"true":"false",clickThrough?"true":"false",continuous?"true":"false",hidden?"true":"false",foreground?"true":"false",GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN));
-    return visible&&clickThrough&&continuous&&hidden&&foreground?0:3;
+    return visible&&clickThrough&&continuous&&hidden&&foreground&&zero?0:3;
 }

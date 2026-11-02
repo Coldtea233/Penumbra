@@ -20,12 +20,12 @@ int main() {
     check(!WantsDesktopBlur(true,false,true,ForegroundKind::Transient,false),"tray transition does not spontaneously enable blur");
     check(!WantsDesktopBlur(true,false,true,ForegroundKind::Desktop,true),"desktop click still disables blur immediately");
     for(int radius=0;radius<=48;radius++) {
-        double extra=blur_parameters::AdditionalSigma(radius);
-        double effective=std::sqrt(blur_parameters::BaselineSigma*blur_parameters::BaselineSigma+extra*extra);
-        check(std::abs(effective-(blur_parameters::BaselineSigma+radius))<1e-9,"linear effective-radius increment");
+        check(blur_parameters::Sigma(radius)==radius,"Gaussian sigma directly matches every slider radius");
     }
-    check(blur_parameters::AdditionalSigma(0)==0,"zero adds no extra Gaussian variance");
-    check(blur_parameters::AdditionalSigma(12)>20,"low radii are no longer buried in the baseline variance");
+    check(blur_parameters::Sigma(0)==0,"zero is completely unfiltered");
+    check(blur_parameters::Sigma(1)==1,"one is a genuinely small Gaussian kernel");
+    check(blur_parameters::Sigma(-1)==0&&blur_parameters::Sigma(49)==48,"radius is clamped");
+    check(blur_parameters::Sigma(NAN)==12&&blur_parameters::Sigma(INFINITY)==12,"non-finite radius uses the default");
     check(!params.blurEnabled&&params.blurRadius==12,"old settings keep blur opt-in");
     transition.Reset(true); blurTransition.Reset(false);
     check(transition.Target()&&!blurTransition.Target(),"vignette and blur states are independent");

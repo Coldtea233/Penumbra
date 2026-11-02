@@ -43,7 +43,7 @@ extern "C" __declspec(dllexport) UINT __stdcall CheckEnvironment(MSIHANDLE insta
     LONG buildResult=RegGetValueW(HKEY_LOCAL_MACHINE,versionKey,L"CurrentBuildNumber",RRF_RT_REG_SZ,nullptr,build,&bytes);
     if(majorResult!=ERROR_SUCCESS||buildResult!=ERROR_SUCCESS||major<10||wcstoul(build,nullptr,10)<19041)
         return Error(install,L"Penumbra 需要 Windows 10 2004（19041）或更新的系统。");
-    if(Running(L"Local\\Nocturne.Renderer.v1")||Running(L"Local\\VignFinder.Settings.v3"))
+    if(Running(L"Local\\Nocturne.Renderer.v1")||Running(L"Local\\VignFinder.Settings.v3")||Running(L"Local\\Penumbra.Settings.Beta0.6"))
         return Error(install,L"请先关闭 Penumbra 设置窗口，并从托盘退出暗角后台，然后重新安装或卸载。未应用的参数不会自动保存。");
     return ERROR_SUCCESS;
 }

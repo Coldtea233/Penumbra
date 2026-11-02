@@ -15,7 +15,23 @@ internal sealed record DesktopSnapshot(byte[] Pixels, int Width, int Height, byt
         var (host, icons) = FindDesktop(sourceWidth, sourceHeight);
         if (!GetWindowRect(host, out var bounds) || bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("无法读取桌面窗口尺寸。");
-        var frame = await WindowCapture.CaptureAsync(host);
+        // This color target is a wallpaper child and therefore appears in a
+        // root capture, unlike the separate vignette/blur popups. Acquire raw
+        // colors once so subsequent slider edits never apply saturation twice.
+        // The native lease times out if capture or the UI process fails.
+        var controller = FindWindow("Nocturne.Controller", null);
+        bool rawColor = controller != IntPtr.Zero &&
+            SendMessageTimeout(controller, 0x8007, 104, (IntPtr)Environment.ProcessId, 2, 100, out var acknowledged) != IntPtr.Zero && acknowledged == 1;
+        WindowCapture.Frame frame;
+        try
+        {
+            if (rawColor) await Task.Delay(34);
+            frame = await WindowCapture.CaptureAsync(host);
+        }
+        finally
+        {
+            if (rawColor) SendMessageTimeout(controller, 0x8007, 105, (IntPtr)Environment.ProcessId, 2, 100, out _);
+        }
         int width = 640, height = Math.Clamp((int)Math.Round(640.0 * sourceHeight / sourceWidth), 1, 2560);
         var pixels = ScalePrimary(frame, bounds, sourceWidth, sourceHeight, width, height);
         // New Explorer versions host wallpaper and icons in one tree. Older
@@ -140,6 +156,8 @@ internal sealed record DesktopSnapshot(byte[] Pixels, int Width, int Height, byt
         }
     }
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string className, string? title);
+    [DllImport("user32.dll")] private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, nuint wp, IntPtr lp, uint flags, uint timeout, out nuint result);
     private static string ClassName(IntPtr window)
     {
         var name = new StringBuilder(128);

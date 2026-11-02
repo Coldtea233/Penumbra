@@ -19,6 +19,9 @@ public sealed partial class MainWindow : Window
     private bool busy;
     private bool previewRenderPending;
     private bool updatingBlurControls;
+    private bool blurRadiusPending;
+    private bool blurRadiusPreviewActive;
+    private bool wallpaperRunning, updatingSaturationControls, saturationPending, saturationPreviewActive;
     private bool? wideLayout;
     private DesktopSnapshot? snapshot;
     private double previewAspect = 16.0 / 9.0;
@@ -27,16 +30,21 @@ public sealed partial class MainWindow : Window
     private readonly WindowSizing windowSizing;
     private bool checkingWallpaperStatus;
     private bool windowClosed;
+    private bool closeApproved, closePending;
     private WriteableBitmap? previewBitmap;
     private byte[]? previewPixels;
     private byte[]? blurredPreview;
     private double blurredPreviewRadius = -1;
+    private byte[]? colorPreview;
+    private double colorPreviewSaturation = -1;
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private static string RendererPath => Path.Combine(AppContext.BaseDirectory, "Nocturne.Renderer.exe");
     public string DisplayVersion => typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion.Split('+')[0];
     public MainWindow()
     {
+        StartupCheck.Stage("MainWindow InitializeComponent begin");
         InitializeComponent();
+        StartupCheck.Stage("MainWindow XAML connected");
         SystemBackdrop = new MicaBackdrop();
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(TitleBar);
@@ -51,13 +59,40 @@ public sealed partial class MainWindow : Window
             if (ready && e.WindowActivationState != WindowActivationState.Deactivated)
                 await RefreshWallpaperStatusAsync();
         };
+        AppWindow.Closing += async (_, e) =>
+        {
+            if (closeApproved || StartupCheck.Isolated) return;
+            e.Cancel = true;
+            if (closePending) return;
+            if (busy) { StatusText.Text = "正在应用参数，请稍后关闭窗口"; return; }
+            closePending = true;
+            try
+            {
+                // Keep existing effects untouched. A new tray-only backend is
+                // paused until Apply or an explicit tray Resume command.
+                if (FindWindow("Nocturne.Controller", null) == IntPtr.Zero)
+                {
+                    using var readyEvent = new EventWaitHandle(false, EventResetMode.ManualReset, @"Local\Penumbra.TrayReady.v1");
+                    readyEvent.Reset();
+                    using var backend = Process.Start(new ProcessStartInfo(RendererPath, "--tray-only") { UseShellExecute = false, CreateNoWindow = true });
+                    if (!await Task.Run(() => readyEvent.WaitOne(TimeSpan.FromSeconds(5))))
+                        throw new InvalidOperationException("无法创建托盘图标，窗口已保留，请重试。");
+                }
+                closeApproved = true;
+                Close();
+            }
+            catch (Exception ex) { StatusText.Text = "收起到托盘失败：" + ex.Message; }
+            finally { closePending = false; }
+        };
         Closed += (_, _) =>
         {
-
+            CancelDesktopBlurRadiusPreview();
+            CancelDesktopSaturationPreview();
             windowClosed = true;
             wallpaperStatusTimer.Stop();
             previewTimer?.Stop();
             windowSizing.Dispose();
+            Application.Current.Exit();
         };
         previewTimer = DispatcherQueue.GetForCurrentThread().CreateTimer();
         previewTimer.Interval = TimeSpan.FromMilliseconds(35);
@@ -66,6 +101,16 @@ public sealed partial class MainWindow : Window
         {
             previewTimer.Stop();
             previewRenderPending = false;
+            if (blurRadiusPending && ready && !busy)
+            {
+                blurRadiusPending = false;
+                PreviewDesktopBlurRadius();
+            }
+            if (saturationPending && ready && !busy)
+            {
+                saturationPending = false;
+                PreviewDesktopSaturation();
+            }
             if (snapshot is not null && ready)
             {
                 try { DrawPreview(ReadControls()); }
@@ -96,6 +141,8 @@ public sealed partial class MainWindow : Window
             ToolTipService.SetToolTip(BlurEnabledCheckBox, "桌面实时模糊需要 Windows 11；当前系统仍可正常使用暗角。");
         }
         UpdateBlurControls();
+        UpdateSaturationControls();
+        StartupCheck.Stage("MainWindow constructor completed");
     }
     private void LoadControls(Settings s)
     {
@@ -107,9 +154,12 @@ public sealed partial class MainWindow : Window
         TintCombo.SelectedIndex = s.Tint; MonitorCombo.SelectedIndex = s.PrimaryOnly ? 1 : 0;
         DarkenIconsCheckBox.IsChecked = s.DarkenIcons;
         FocusOnlyCheckBox.IsChecked = s.FocusOnly;
-        BlurEnabledCheckBox.IsChecked = s.BlurEnabled;
+        BlurEnabledCheckBox.IsOn = s.BlurEnabled;
         BlurRadiusSlider.Value = s.BlurRadius;
+        SaturationEnabledCheckBox.IsOn = s.SaturationEnabled;
+        SaturationSlider.Value = s.Saturation;
         UpdateBlurControls();
+        UpdateSaturationControls();
         ready = wasReady;
         if (wasReady) SchedulePreviewRender();
     }
@@ -121,8 +171,89 @@ public sealed partial class MainWindow : Window
             ShapeSlider.Value / 100, Math.Clamp(CenterXBox.Value / 100, 0, 1), Math.Clamp(CenterYBox.Value / 100, 0, 1),
             Math.Clamp(TintCombo.SelectedIndex, 0, 2), MonitorCombo.SelectedIndex == 1,
             DarkenIconsCheckBox.IsChecked == true, FocusOnlyCheckBox.IsChecked == true,
-            OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) && BlurEnabledCheckBox.IsChecked == true,
-            BlurRadiusSlider.Value);
+            OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) && BlurEnabledCheckBox.IsOn,
+            BlurRadiusSlider.Value,
+            OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) && SaturationEnabledCheckBox.IsOn,
+            SaturationSlider.Value);
+    }
+    private void UpdateSaturationControls()
+    {
+        // XAML may raise ValueChanged before the later named elements exist.
+        // Synchronize only a fully connected group, never a partially loaded tree.
+        if (SaturationSlider is null || SaturationBox is null || SaturationEnabledCheckBox is null ||
+            SaturationAvailabilityText is null || updatingSaturationControls) return;
+        updatingSaturationControls = true;
+        try
+        {
+            SaturationBox.Value = SaturationSlider.Value;
+            bool available = wallpaperRunning && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000);
+            SaturationEnabledCheckBox.IsEnabled = SaturationSlider.IsEnabled = SaturationBox.IsEnabled = available;
+            SaturationAvailabilityText.Text = !OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)
+                ? "此功能需要 Windows 11" : available ? "" : "运行 Wallpaper Engine 后可启用";
+            SaturationAvailabilityText.Visibility = available ? Visibility.Collapsed : Visibility.Visible;
+        }
+        finally { updatingSaturationControls = false; }
+    }
+    private void SaturationOption_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!ready) return;
+        colorPreview = blurredPreview = null;
+        ScheduleDesktopSaturationPreview();
+        SchedulePreviewRender();
+    }
+    private void Saturation_Changed(object sender, RangeBaseValueChangedEventArgs e)
+    {
+        if (!ready || updatingSaturationControls) return;
+        UpdateSaturationControls();
+        colorPreview = blurredPreview = null;
+        ScheduleDesktopSaturationPreview();
+        SchedulePreviewRender();
+    }
+    private void SaturationBox_Changed(NumberBox sender, NumberBoxValueChangedEventArgs e)
+    {
+        if (!ready || updatingSaturationControls || SaturationSlider is null || !double.IsFinite(e.NewValue)) return;
+        updatingSaturationControls = true;
+        try { SaturationSlider.Value = Math.Clamp(Math.Round(e.NewValue), 0, 100); }
+        finally { updatingSaturationControls = false; }
+        UpdateSaturationControls();
+        colorPreview = blurredPreview = null;
+        ScheduleDesktopSaturationPreview();
+        SchedulePreviewRender();
+    }
+    private void ScheduleDesktopSaturationPreview()
+    {
+        if (!ready || busy) return;
+        if (!wallpaperRunning || !SaturationEnabledCheckBox.IsOn)
+        {
+            CancelDesktopSaturationPreview();
+            return;
+        }
+        saturationPending = true;
+        SchedulePreviewRender();
+    }
+    private static nuint SendSaturationCommand(uint command)
+    {
+        var controller = FindWindow("Nocturne.Controller", null);
+        if (controller == IntPtr.Zero) return 0;
+        return SendMessageTimeout(controller, 0x8007, (nuint)command, (IntPtr)Environment.ProcessId,
+            0x0002, 100, out var result) != IntPtr.Zero ? result : 0;
+    }
+    private void PreviewDesktopSaturation()
+    {
+        uint saturation = (uint)Math.Clamp(Math.Round(SaturationSlider.Value), 0, 100);
+        if (SendSaturationCommand(saturation) == saturation + 1)
+        {
+            saturationPreviewActive = true;
+            StatusText.Text = $"壁纸饱和度已预览：{saturation}% · 点击应用保存";
+        }
+        else StatusText.Text = "壁纸降饱和度尚未启用 · 勾选并点击应用后生效";
+    }
+    private void CancelDesktopSaturationPreview()
+    {
+        saturationPending = false;
+        if (!saturationPreviewActive) return;
+        SendSaturationCommand(101);
+        saturationPreviewActive = false;
     }
     private void UpdateBlurControls()
     {
@@ -134,14 +265,14 @@ public sealed partial class MainWindow : Window
     private void BlurOption_Changed(object sender, RoutedEventArgs e)
     {
         UpdateBlurControls();
-
+        ScheduleDesktopBlurRadiusPreview();
         SchedulePreviewRender();
     }
     private void BlurRadius_Changed(object sender, RangeBaseValueChangedEventArgs e)
     {
         if (updatingBlurControls) return;
         UpdateBlurControls();
-
+        ScheduleDesktopBlurRadiusPreview();
         SchedulePreviewRender();
     }
     private void BlurRadiusBox_Changed(NumberBox sender, NumberBoxValueChangedEventArgs e)
@@ -151,8 +282,45 @@ public sealed partial class MainWindow : Window
         try { BlurRadiusSlider.Value = Math.Clamp(Math.Round(e.NewValue), 0, 48); }
         finally { updatingBlurControls = false; }
         UpdateBlurControls();
-
+        ScheduleDesktopBlurRadiusPreview();
         SchedulePreviewRender();
+    }
+    private void ScheduleDesktopBlurRadiusPreview()
+    {
+        if (!ready || busy) return;
+        if (!BlurEnabledCheckBox.IsOn)
+        {
+            blurRadiusPending = false;
+            CancelDesktopBlurRadiusPreview();
+            return;
+        }
+        blurRadiusPending = true;
+        SchedulePreviewRender();
+    }
+    private static nuint SendBlurRadiusCommand(uint command)
+    {
+        var controller = FindWindow("Nocturne.Controller", null);
+        if (controller == IntPtr.Zero) return 0;
+        return SendMessageTimeout(controller, 0x8006, (nuint)command, (IntPtr)Environment.ProcessId,
+            0x0002, 100, out var result) != IntPtr.Zero ? result : 0;
+    }
+    private void PreviewDesktopBlurRadius()
+    {
+        uint radius = (uint)Math.Clamp(Math.Round(BlurRadiusSlider.Value), 0, 48);
+        nuint result = SendBlurRadiusCommand(radius);
+        if (result == radius + 1)
+        {
+            blurRadiusPreviewActive = true;
+            StatusText.Text = $"桌面模糊半径已预览：{radius} px · 点击应用保存";
+        }
+        else StatusText.Text = "桌面模糊尚未启用 · 勾选模糊并点击应用后生效";
+    }
+    private void CancelDesktopBlurRadiusPreview()
+    {
+        blurRadiusPending = false;
+        if (!blurRadiusPreviewActive) return;
+        SendBlurRadiusCommand(49);
+        blurRadiusPreviewActive = false;
     }
     private void Parameter_Changed(object sender, RangeBaseValueChangedEventArgs e)
     {
@@ -179,7 +347,9 @@ public sealed partial class MainWindow : Window
     }
     private void Reset_Click(object sender, RoutedEventArgs e)
     {
-
+        CancelDesktopBlurRadiusPreview();
+        CancelDesktopSaturationPreview();
+        colorPreview = blurredPreview = null;
         LoadControls(new Settings());
         StatusText.Text = "已恢复默认参数";
     }
@@ -188,15 +358,28 @@ public sealed partial class MainWindow : Window
         if (e.NewSize.Width <= 0) return;
         bool wide = e.NewSize.Width >= 920;
         if (wideLayout == wide) return;
+        ApplyResponsiveLayout(wide);
+    }
+    private void ApplyResponsiveLayout(bool wide)
+    {
         wideLayout = wide;
+        // Keep one set of controls/state while moving the experimental group.
+        // Narrow order: preview, vignette, experiments, About.
+        if (ExperimentalPanel.Parent is Panel previous) previous.Children.Remove(ExperimentalPanel);
+        if (wide) PreviewPanel.Children.Add(ExperimentalPanel);
+        else SettingsLayout.Children.Add(ExperimentalPanel);
+        Grid.SetColumn(ExperimentalPanel, 0);
+        Grid.SetRow(ExperimentalPanel, 2);
+        ExperimentalPanel.Margin = new Thickness(0, wide ? 12 : 24, 0, 0);
         PreviewColumn.MinWidth = wide ? 300 : 0;
         ParameterColumn.Width = new GridLength(wide ? 340 : 0);
         SettingsLayout.ColumnSpacing = wide ? 28 : 0;
         Grid.SetColumn(ParameterPanel, wide ? 1 : 0);
         Grid.SetRow(ParameterPanel, wide ? 0 : 1);
-        Grid.SetRowSpan(ParameterPanel, wide ? 2 : 1);
-        Grid.SetRow(AboutSection, wide ? 1 : 2);
-        AboutSection.Margin = wide ? new Thickness(0, 24, 24, 0) : new Thickness(0, 24, 0, 0);
+        Grid.SetRowSpan(PreviewPanel, wide ? 2 : 1);
+        Grid.SetColumn(AboutSection, wide ? 1 : 0);
+        Grid.SetRow(AboutSection, wide ? 1 : 3);
+        AboutSection.Margin = wide ? new Thickness(8, 24, 0, 0) : new Thickness(0, 24, 0, 0);
         ParameterPanel.Margin = wide ? new Thickness(8, 8, 0, 0) : new Thickness(0, 24, 0, 0);
     }
     private void Preview_SizeChanged(object sender, SizeChangedEventArgs e)
@@ -223,14 +406,24 @@ public sealed partial class MainWindow : Window
         }
         var pixels = previewPixels;
         byte[] source = snapshot.Pixels;
+        if (s.SaturationEnabled && wallpaperRunning)
+        {
+            if (colorPreview is null || colorPreviewSaturation != s.Saturation)
+            {
+                colorPreview = PreviewColor.Apply(source, snapshot.Icons, s.Saturation);
+                colorPreviewSaturation = s.Saturation;
+                blurredPreview = null;
+            }
+            source = colorPreview;
+        }
         if (s.BlurEnabled)
         {
             if (blurredPreview is null || blurredPreviewRadius != s.BlurRadius)
             {
-                // Approximation only: host-backdrop's baseline depends on
-                // Windows, DPI and policy. Never claim screenshot equality.
+                // Match the unfiltered desktop source, scaled to the small
+                // preview. The CPU filter is a Gaussian approximation only.
                 double sigma = BlurParameters.PreviewSigma(s.BlurRadius, w, GetSystemMetrics(0));
-                blurredPreview = PreviewBlur.Apply(snapshot.Pixels, w, h, sigma);
+                blurredPreview = PreviewBlur.Apply(source, w, h, sigma);
                 blurredPreviewRadius = s.BlurRadius;
             }
             source = blurredPreview;
@@ -269,14 +462,42 @@ public sealed partial class MainWindow : Window
     }
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        StartupCheck.Stage("MainWindow Loaded");
+        if (StartupCheck.Isolated) return;
         wallpaperStatusTimer.Start();
         _ = RefreshWallpaperStatusAsync();
         if (busy || snapshot is not null) return;
         busy = true;
         SetCommandsEnabled(false);
-        try { await CapturePreviewCoreAsync(); }
-        catch (Exception ex) { StatusText.Text = "壁纸刷新失败：" + ex.Message; }
-        finally { busy = false; SetCommandsEnabled(true); }
+        try { await CapturePreviewCoreAsync(); StartupCheck.Stage("Initial wallpaper capture completed"); }
+        catch (Exception ex) { StartupCheck.Stage("Initial capture unavailable: " + ex.Message); StatusText.Text = "壁纸刷新失败：" + ex.Message; }
+        finally { busy = false; SetCommandsEnabled(true); StartupCheck.Stage("Startup commands enabled"); }
+    }
+    internal void VerifyStartup()
+    {
+        if (!ready || !Root.IsLoaded || !AppWindow.IsVisible || Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
+            throw new InvalidOperationException("Settings window was not loaded and visible.");
+        if (DisplayVersion != "Beta 0.6" || BlurTitle.Text != "实验性功能" ||
+            BlurEnabledCheckBox.Parent is not StackPanel || SaturationEnabledCheckBox.Parent != SaturationSection ||
+            !ApplyButton.IsEnabled || !CaptureButton.IsEnabled)
+            throw new InvalidOperationException("Version, settings groups or command buttons failed initialization.");
+        if (SaturationBox.Value != SaturationSlider.Value || BlurRadiusBox.Value != BlurRadiusSlider.Value)
+            throw new InvalidOperationException("Settings number fields were not initialized from their sliders.");
+        bool originalWide = Root.ActualWidth >= 920;
+        try
+        {
+            foreach (bool wide in new[] { false, true, false, true })
+            {
+                ApplyResponsiveLayout(wide);
+                if (ExperimentalPanel.Parent != (wide ? (Panel)PreviewPanel : SettingsLayout) ||
+                    Grid.GetRow(ParameterPanel) != (wide ? 0 : 1) ||
+                    Grid.GetRow(AboutSection) != (wide ? 1 : 3) ||
+                    Grid.GetColumn(AboutSection) != (wide ? 1 : 0) ||
+                    (!wide && Grid.GetRow(ExperimentalPanel) != 2))
+                    throw new InvalidOperationException("Responsive section order is incorrect.");
+            }
+        }
+        finally { ApplyResponsiveLayout(originalWide); }
     }
     private async Task CapturePreviewCoreAsync()
     {
@@ -284,6 +505,7 @@ public sealed partial class MainWindow : Window
         StatusText.Text = "正在刷新壁纸…";
         var captured = await DesktopSnapshot.CaptureAsync();
         snapshot = captured;
+        colorPreview = null;
         blurredPreview = null;
         previewAspect = (double)captured.Width / captured.Height;
         ResizePreview();
@@ -301,6 +523,14 @@ public sealed partial class MainWindow : Window
             var state = await Task.Run(WallpaperEngineStatus.Detect);
             if (windowClosed) return;
             bool running = state == WallpaperEngineState.Running;
+            if (wallpaperRunning != running)
+            {
+                wallpaperRunning = running;
+                colorPreview = blurredPreview = null;
+                if (!running) CancelDesktopSaturationPreview();
+                SchedulePreviewRender();
+            }
+            UpdateSaturationControls();
             WallpaperEngineDot.Fill = new SolidColorBrush(running
                 ? Windows.UI.Color.FromArgb(255, 99, 204, 134)
                 : Windows.UI.Color.FromArgb(255, 139, 144, 152));
@@ -323,7 +553,8 @@ public sealed partial class MainWindow : Window
     private async void Apply_Click(object sender, RoutedEventArgs e)
     {
         if (busy) return;
-
+        CancelDesktopBlurRadiusPreview();
+        CancelDesktopSaturationPreview();
         busy = true;
         SetCommandsEnabled(false);
         SettingsScrollViewer.IsEnabled = false;
@@ -386,6 +617,8 @@ public sealed partial class MainWindow : Window
         catch (Exception ex) { StatusText.Text = "关闭失败：" + ex.Message; }
     }
     [DllImport("user32.dll")] private static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr FindWindow(string className, string? windowName);
+    [DllImport("user32.dll")] private static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, nuint wParam, IntPtr lParam, uint flags, uint timeout, out nuint result);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr hwnd);
 }

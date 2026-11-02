@@ -94,7 +94,7 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
     if(!valid) { Inform(L"参数无效",L"支持 /quiet、/log <日志路径> 或 /extract <新的 MSI 文件路径>。",true); return ERROR_INVALID_PARAMETER; }
     if(extractPath.empty()) {
         if(!quiet&&!ConfirmInstall()) return ERROR_INSTALL_USEREXIT;
-        if(Busy(L"Local\\VignFinder.Settings.v3")||Busy(L"Local\\Nocturne.Renderer.v1")) {
+        if(Busy(L"Local\\Penumbra.Settings.Beta0.6")||Busy(L"Local\\VignFinder.Settings.v3")||Busy(L"Local\\Nocturne.Renderer.v1")) {
             Inform(L"Penumbra 正在运行",L"请先保存参数，关闭 Penumbra 设置窗口，并从托盘退出后台，再重新安装。程序不会强行关闭窗口或丢弃未保存参数。",true);
             return ERROR_INSTALL_ALREADY_RUNNING;
         }

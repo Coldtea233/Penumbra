@@ -8,6 +8,7 @@ internal static class EntryPoint
     {
         try
         {
+            StartupCheck.Configure(args);
             WinRT.ComWrappersSupport.InitializeComWrappers();
             Application.Start(p =>
             {
@@ -18,6 +19,7 @@ internal static class EntryPoint
         }
         catch (Exception e)
         {
+            StartupCheck.Failed(e);
             Directory.CreateDirectory(Settings.DirectoryPath);
             File.WriteAllText(Path.Combine(Settings.DirectoryPath, "startup-error.txt"), e.ToString());
         }
