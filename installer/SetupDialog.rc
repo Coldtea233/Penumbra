@@ -1,0 +1,31 @@
+#pragma code_page(65001)
+#include <windows.h>
+202 DIALOGEX 0, 0, 352, 203
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Penumbra 安装程序"
+FONT 9, "Segoe UI"
+BEGIN
+    ICON 101, 1000, 16, 16, 24, 24
+    LTEXT "Penumbra", 1001, 52, 17, 282, 16
+    LTEXT "为当前用户安装", 1002, 52, 35, 282, 20
+    LTEXT "安装位置", 1003, 16, 67, 320, 12
+    EDITTEXT 1004, 16, 83, 259, 16, ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON "浏览…", 1005, 282, 83, 54, 16
+    LTEXT "可选择其他本地文件夹；更新将保留个人配置。", 1006, 16, 108, 320, 15
+    LTEXT "安装前请关闭设置窗口，并从托盘退出后台。\n完成后可选择自动运行，不会更改登录自启动。", 1007, 16, 130, 320, 25
+    DEFPUSHBUTTON "安装", IDOK, 216, 174, 58, 18
+    PUSHBUTTON "取消", IDCANCEL, 282, 174, 54, 18
+END
+
+203 DIALOGEX 0, 0, 352, 180
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Penumbra 安装完成"
+FONT 9, "Segoe UI"
+BEGIN
+    ICON 101, 1100, 16, 16, 24, 24
+    LTEXT "Penumbra 已安装", 1101, 52, 17, 282, 16
+    LTEXT "安装位置", 1102, 52, 36, 282, 32
+    CONTROL "完成后自动运行 Penumbra", 1110, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 24, 85, 306, 16
+    LTEXT "个人配置和登录自启动保持不变。", 1103, 24, 116, 304, 16
+    DEFPUSHBUTTON "完成", IDOK, 278, 152, 58, 18
+END

@@ -71,7 +71,11 @@ bool iconsDirty=false, animationTimerArmed=false;
 bool windowStatePending=false, reorderPending=false, iconPending=false;
 double frameIntervalMs=1000.0/60, detectedRefreshHz=0, nextFrameAt=0;
 focus_animation::Transition transition;
-struct BlurSurface { desktop_blur::Engine::Surface composition; RECT rect{}, protectedArea{}; bool protectionValid=false; };
+struct BlurSurface {
+    desktop_blur::Engine::Surface composition;
+    RECT rect{}, protectedArea{};
+    bool protectionValid=false;
+};
 std::unique_ptr<desktop_blur::Engine> blurEngine;
 std::vector<BlurSurface> blurSurfaces;
 focus_animation::Transition blurTransition;
@@ -81,11 +85,12 @@ bool blurTimerArmed=false;
 bool blurBoundsPending=false;
 HANDLE blurPreviewProcess{};
 DWORD blurPreviewClient=0;
-struct ColorSurface { desktop_blur::Engine::Surface composition; wallpaper_layer::Layer layer; RECT rect{},safe{}; bool clipped=false; };
+HRESULT blurLastResult=S_OK;
+struct ColorSurface { desktop_blur::Engine::Surface composition; wallpaper_layer::Layer layer; RECT rect{},safe{}; bool clipped=false,includeIcons=false; };
 std::vector<ColorSurface> colorSurfaces;
 focus_animation::Transition colorTransition;
 HANDLE colorAnimationTick{},colorPreviewProcess{},wallpaperProcess{};
-DWORD colorPreviewClient=0,colorCaptureClient=0;
+DWORD colorPreviewClient=0,wallpaperCaptureClient=0;
 bool colorTimerArmed=false,colorHostPending=false;
 double colorNextFrameAt=0;
 HRESULT colorLastResult=S_OK;
@@ -303,19 +308,29 @@ void StopColorAnimation() {
 }
 void ClearColor() {
     StopColorAnimation(); colorTransition.Reset(false);
-    colorCaptureClient=0;if(controller) KillTimer(controller,7);
     if(colorPreviewProcess) { CloseHandle(colorPreviewProcess); colorPreviewProcess=nullptr; }
     if(wallpaperProcess) { CloseHandle(wallpaperProcess); wallpaperProcess=nullptr; }
     colorPreviewClient=0;
     for(auto& s:colorSurfaces) s.composition.Reset();
     colorSurfaces.clear();
 }
-void Clear() { StopAnimation(); ClearColor(); ClearBlur(); FlushFrameTrace(); for(auto& s:surfaces) DropSurface(s); surfaces.clear(); }
-bool DesktopPlacementCurrent(HWND window,const RECT& rect) {
+void Clear() {
+    StopAnimation();ClearColor();ClearBlur();
+    wallpaperCaptureClient=0;if(controller) KillTimer(controller,7);
+    FlushFrameTrace();for(auto& s:surfaces) DropSurface(s);surfaces.clear();
+}
+bool WindowAbove(HWND above,HWND below) {
+    if(!above||!below||above==below) return false;
+    for(HWND next=GetWindow(above,GW_HWNDNEXT);next;next=GetWindow(next,GW_HWNDNEXT))
+        if(next==below) return true;
+    return false;
+}
+bool DesktopPlacementCurrent(HWND window,const RECT& rect,HWND above=nullptr) {
     if(!IsWindowVisible(window)||GetWindow(window,GW_OWNER)!=desktop||
        (GetWindowLongPtrW(window,GWL_EXSTYLE)&WS_EX_TOPMOST)) return false;
     RECT actual{};
     if(!GetWindowRect(window,&actual)||!EqualRect(&actual,&rect)) return false;
+    if(above&&!WindowAbove(above,window)) return false;
     // Do not restack a live backdrop just because a timer or foreground event
     // arrived. Changing its DWM sampling boundary can invalidate the backdrop
     // even when the requested coordinates and order did not actually change.
@@ -325,15 +340,21 @@ bool DesktopPlacementCurrent(HWND window,const RECT& rect) {
     }
     return false;
 }
-bool PlaceDesktopPopup(HWND window,const RECT& rect,bool visible) {
+bool PlaceDesktopPopup(HWND window,const RECT& rect,bool visible,HWND above=nullptr) {
     if(!visible) { if(IsWindowVisible(window)) ShowWindow(window,SW_HIDE); return true; }
     if(!IsWindow(window)||!IsWindow(desktop)) return false;
-    if(DesktopPlacementCurrent(window,rect)) return true;
+    // A relative anchor is permitted only for OUR desktop effect, never an
+    // application HWND that may belong to an elevated/foreign process.
+    if(above) {
+        DWORD pid=0;GetWindowThreadProcessId(above,&pid);
+        if(pid!=GetCurrentProcessId()||!DesktopPlacementCurrent(above,rect)) return false;
+    }
+    if(DesktopPlacementCurrent(window,rect,above)) return true;
     if(GetWindow(window,GW_OWNER)!=desktop) {
         SetLastError(ERROR_SUCCESS);
         if(!SetWindowLongPtrW(window,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(desktop))&&GetLastError()!=ERROR_SUCCESS) return false;
     }
-    return SetWindowPos(window,HWND_BOTTOM,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,
+    return SetWindowPos(window,above?above:HWND_BOTTOM,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,
         SWP_NOACTIVATE|SWP_NOOWNERZORDER|SWP_SHOWWINDOW)!=FALSE;
 }
 bool PositionSurface(Surface& s, bool show) {
@@ -345,7 +366,21 @@ bool PositionSurface(Surface& s, bool show) {
     // Only change OUR window; never reposition Explorer or a foreign app.
     // HWND_BOTTOM also clears an accidental topmost flag. Do not move or
     // activate the owner, and do not promote the overlay to HWND_TOP on failure.
-    return PlaceDesktopPopup(s.hwnd,s.rect,show&&!paused&&!capturingPreview&&(transition.Target()||animationTimerArmed));
+    // Protect the original icon pixels BEFORE the whole-desktop Gaussian.
+    // A sharp icon-shaped hole must never be drawn over already blurred icons.
+    HWND blurAbove=nullptr;
+    for(const auto& blur:blurSurfaces)
+        if(EqualRect(&s.rect,&blur.rect)&&DesktopPlacementCurrent(blur.composition.hwnd,blur.rect)) {
+            blurAbove=blur.composition.hwnd;break;
+        }
+    if(!PlaceDesktopPopup(s.hwnd,s.rect,show&&!paused&&!capturingPreview&&(transition.Target()||animationTimerArmed),blurAbove)) return false;
+    // Whole-desktop color belongs BELOW the vignette (preserving its tint),
+    // which in turn belongs below blur. A newly shown vignette may initially
+    // be at the shell bottom; repair only an actually inverted pair.
+    if(IsWindowVisible(s.hwnd)) for(auto& color:colorSurfaces)
+        if(color.includeIcons&&EqualRect(&s.rect,&color.rect)&&IsWindowVisible(color.composition.hwnd)&&WindowAbove(color.composition.hwnd,s.hwnd))
+            if(!PlaceDesktopPopup(color.composition.hwnd,color.rect,true,s.hwnd)) return false;
+    return true;
 }
 bool ProtectBlurTaskbar(BlurSurface& s) {
     RECT safe=blur_bounds::DesktopArea(s.rect);
@@ -362,10 +397,12 @@ bool PositionBlurSurfaces() {
     for(auto& s:blurSurfaces) {
         if(!ProtectBlurTaskbar(s)) { ShowWindow(s.composition.hwnd,SW_HIDE); return false; }
         HWND window=s.composition.hwnd;
-        // Reinsert LAST at the bottom: blur stays below our vignette and above
-        // its desktop owner, never above ordinary apps. No foreign HWND anchor.
-        if(!PlaceDesktopPopup(window,s.rect,!paused&&!capturingPreview&&(blurTransition.Target()||blurTimerArmed))) return false;
+        bool visible=!paused&&!capturingPreview&&(blurTransition.Target()||blurTimerArmed);
+        if(!PlaceDesktopPopup(window,s.rect,visible)) return false;
     }
+    // Recheck the pair on every show/recovery, not just at construction. The
+    // cache retains correct relative order without repeatedly restacking DWM.
+    for(auto& s:surfaces) if(IsWindowVisible(s.hwnd)&&!PositionSurface(s,true)) return false;
     return true;
 }
 bool SetLiveBlurRadius(float radius) {
@@ -446,7 +483,16 @@ bool PositionColorSurfaces() {
             if(!SetWindowRgn(s.composition.hwnd,region,FALSE)) { DeleteObject(region); return false; }
             s.safe=safe; s.clipped=true;
         }
-        if(!wallpaper_layer::Place(s.composition.hwnd,s.layer,s.rect,!paused&&!capturingPreview&&!colorCaptureClient&&s.composition.radius<1&&(colorTransition.Target()||colorTimerArmed))) return false;
+        bool visible=!paused&&!capturingPreview&&!wallpaperCaptureClient&&s.composition.radius<1&&(colorTransition.Target()||colorTimerArmed);
+        if(s.includeIcons) {
+            if(visible&&(!IsWindow(s.layer.wallpaper)||!IsWindow(s.layer.host))) return false;
+            HWND above=nullptr;
+            for(const auto& vignette:surfaces)
+                if(EqualRect(&s.rect,&vignette.rect)&&DesktopPlacementCurrent(vignette.hwnd,vignette.rect)) { above=vignette.hwnd;break; }
+            if(!above) for(const auto& blur:blurSurfaces)
+                if(EqualRect(&s.rect,&blur.rect)&&DesktopPlacementCurrent(blur.composition.hwnd,blur.rect)) { above=blur.composition.hwnd;break; }
+            if(!PlaceDesktopPopup(s.composition.hwnd,s.rect,visible,above)) return false;
+        } else if(!wallpaper_layer::Place(s.composition.hwnd,s.layer,s.rect,visible)) return false;
     }
     return true;
 }
@@ -492,19 +538,39 @@ void EndSaturationPreview() {
     if(colorPreviewProcess) { CloseHandle(colorPreviewProcess); colorPreviewProcess=nullptr; }
     colorPreviewClient=0;
 }
+std::vector<ColorSurface> PlanColorSurfaces(const std::vector<Surface>& monitors,const std::vector<wallpaper_layer::Layer>& layers) {
+    std::vector<ColorSurface> desired;
+    for(const auto& monitor:monitors) for(const auto& layer:layers) {
+        RECT rect{};
+        if(!IntersectRect(&rect,&layer.bounds,&monitor.rect)) continue;
+        ColorSurface s;s.layer=layer;s.includeIcons=params.darkenIcons;
+        s.rect=s.includeIcons?monitor.rect:rect;desired.push_back(std::move(s));
+        if(params.darkenIcons) break; // One full-desktop filter per monitor, never double-desaturate.
+    }
+    return desired;
+}
+HRESULT CreateColorSurface(ColorSurface& s) {
+    DWORD extended=WS_EX_NOREDIRECTIONBITMAP|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE;
+    DWORD style=WS_CHILD|WS_CLIPSIBLINGS;
+    POINT origin{s.rect.left,s.rect.top};HWND host=s.layer.host;
+    if(s.includeIcons) { extended|=WS_EX_LAYERED|WS_EX_TOOLWINDOW;style=WS_POPUP;host=desktop; }
+    else if(!ScreenToClient(host,&origin)) return HRESULT_FROM_WIN32(GetLastError());
+    s.composition.hwnd=CreateWindowExW(extended,L"Nocturne.ColorSurface",L"Penumbra saturation",style,origin.x,origin.y,
+        s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,host,nullptr,instance,nullptr);
+    if(!s.composition.hwnd) return HRESULT_FROM_WIN32(GetLastError());
+    if(s.includeIcons&&!SetLayeredWindowAttributes(s.composition.hwnd,0,255,LWA_ALPHA)) return HRESULT_FROM_WIN32(GetLastError());
+    if(!blurEngine) blurEngine=std::make_unique<desktop_blur::Engine>();
+    return blurEngine->Attach(s.composition.hwnd,s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,
+        static_cast<float>(params.saturation/100),s.composition,desktop_blur::Filter::Saturation);
+}
 bool RefreshColorLayers() {
     colorLastResult=S_OK;
     if(!params.saturationEnabled||paused) { ClearColor(); return true; }
-    auto layers=wallpaper_layer::Find();
-    std::vector<ColorSurface> desired;
-    for(const auto& layer:layers) for(const auto& monitor:surfaces) {
-        RECT rect{};
-        if(IntersectRect(&rect,&layer.bounds,&monitor.rect)) { ColorSurface s;s.layer=layer;s.rect=rect;desired.push_back(std::move(s)); }
-    }
+    auto desired=PlanColorSurfaces(surfaces,wallpaper_layer::Find());
     bool same=!desired.empty()&&desired.size()==colorSurfaces.size()&&wallpaperProcess&&WaitForSingleObject(wallpaperProcess,0)==WAIT_TIMEOUT;
     if(same) for(size_t i=0;i<desired.size();i++) {
         auto& a=desired[i];auto& b=colorSurfaces[i];
-        if(a.layer.wallpaper!=b.layer.wallpaper||a.layer.host!=b.layer.host||a.layer.pid!=b.layer.pid||!EqualRect(&a.rect,&b.rect)||!IsWindow(b.composition.hwnd)) { same=false;break; }
+        if(a.includeIcons!=b.includeIcons||a.layer.wallpaper!=b.layer.wallpaper||a.layer.host!=b.layer.host||a.layer.pid!=b.layer.pid||!EqualRect(&a.rect,&b.rect)||!IsWindow(b.composition.hwnd)) { same=false;break; }
     }
     if(same) {
         if(PositionColorSurfaces()) return true;
@@ -517,18 +583,57 @@ bool RefreshColorLayers() {
     if(!wallpaperProcess) return true;
     if(!blurEngine) blurEngine=std::make_unique<desktop_blur::Engine>();
     for(auto& s:desired) {
-        // A non-layered child target is required here. It stays INSIDE the
-        // wallpaper-only Explorer branch, below icons, apps and the taskbar.
-        POINT origin{s.rect.left,s.rect.top};ScreenToClient(s.layer.host,&origin);
-        s.composition.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE,
-            L"Nocturne.ColorSurface",L"Penumbra wallpaper color",WS_CHILD|WS_CLIPSIBLINGS,origin.x,origin.y,
-            s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,s.layer.host,nullptr,instance,nullptr);
-        HRESULT hr=s.composition.hwnd?blurEngine->Attach(s.composition.hwnd,s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,
-            static_cast<float>(params.saturation/100),s.composition,desktop_blur::Filter::Saturation):HRESULT_FROM_WIN32(GetLastError());
+        // Unchecked: wallpaper-only child, preserving original icon colors.
+        // Checked: retained desktop popup including icons, below apps/taskbar.
+        HRESULT hr=CreateColorSurface(s);
         if(FAILED(hr)) { s.composition.Reset();ClearColor();colorLastResult=hr;return false; }
         colorSurfaces.push_back(std::move(s));
     }
     if(!PositionColorSurfaces()) { ClearColor();colorLastResult=E_FAIL;return false; }
+    return true;
+}
+std::vector<BlurSurface> PlanBlurSurfaces(const std::vector<Surface>& monitors) {
+    std::vector<BlurSurface> desired;
+    for(const auto& monitor:monitors) {
+        // Blur includes wallpaper, icons and text in BOTH darkenIcons modes.
+        // Saturation still requires WE; its icon coverage follows darkenIcons.
+        BlurSurface surface;surface.rect=monitor.rect;desired.push_back(std::move(surface));
+    }
+    return desired;
+}
+HRESULT CreateBlurSurface(BlurSurface& surface) {
+    RECT rect=surface.rect;
+    surface.composition.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,
+        L"Nocturne.BlurSurface",L"Penumbra desktop blur",WS_POPUP,rect.left,rect.top,rect.right-rect.left,rect.bottom-rect.top,desktop,nullptr,instance,nullptr);
+    if(surface.composition.hwnd&&!SetLayeredWindowAttributes(surface.composition.hwnd,0,255,LWA_ALPHA)) return HRESULT_FROM_WIN32(GetLastError());
+    if(!surface.composition.hwnd) return HRESULT_FROM_WIN32(GetLastError());
+    if(!blurEngine) blurEngine=std::make_unique<desktop_blur::Engine>();
+    HRESULT hr=blurEngine->Attach(surface.composition.hwnd,rect.right-rect.left,rect.bottom-rect.top,
+        static_cast<float>(params.blurRadius),surface.composition);
+    if(SUCCEEDED(hr)&&!ProtectBlurTaskbar(surface)) hr=E_FAIL;
+    return hr;
+}
+bool RefreshBlurLayers() {
+    blurLastResult=S_OK;
+    if(!params.blurEnabled||paused) {ClearBlur();return true;}
+    auto desired=PlanBlurSurfaces(surfaces);
+    bool same=desired.size()==blurSurfaces.size();
+    if(same) for(size_t index=0;index<desired.size();index++) {
+        const auto& wanted=desired[index];const auto& current=blurSurfaces[index];
+        if(!EqualRect(&wanted.rect,&current.rect)||!IsWindow(current.composition.hwnd)) {same=false;break;}
+    }
+    if(same) {
+        if(PositionBlurSurfaces()) return true;
+        ClearBlur();blurLastResult=E_FAIL;return false;
+    }
+    ClearBlur();
+    if(desired.empty()) return true;
+    for(auto& surface:desired) {
+        HRESULT hr=CreateBlurSurface(surface);
+        if(FAILED(hr)) {surface.composition.Reset();ClearBlur();blurLastResult=hr;return false;}
+        blurSurfaces.push_back(std::move(surface));
+    }
+    if(!PositionBlurSurfaces()) {ClearBlur();blurLastResult=E_FAIL;return false;}
     return true;
 }
 BOOL CALLBACK CollectMonitor(HMONITOR monitor,HDC,LPRECT,LPARAM data) {
@@ -700,25 +805,11 @@ bool Rebuild() {
     if(!transition.Target()&&visible) return false;
     std::wstring message=params.focusOnly?L"暗角已应用 · 存在应用窗口时启用":L"暗角已应用";
     if(params.blurEnabled) {
-        blurPolicyAllowed=desktop_blur::TransparencyAllowed();
-        if(!blurEngine) blurEngine=std::make_unique<desktop_blur::Engine>();
-        HRESULT hr=S_OK;
-        for(const RECT& r:monitors) {
-            BlurSurface s; s.rect=r;
-            // Layered+transparent makes input pass through across process
-            // boundaries, not just to windows on our own UI thread.
-            s.composition.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,
-                L"Nocturne.BlurSurface",L"Penumbra desktop blur",WS_POPUP,r.left,r.top,r.right-r.left,r.bottom-r.top,desktop,nullptr,instance,nullptr);
-            if(!s.composition.hwnd) hr=HRESULT_FROM_WIN32(GetLastError());
-            else if(!SetLayeredWindowAttributes(s.composition.hwnd,0,255,LWA_ALPHA)) hr=HRESULT_FROM_WIN32(GetLastError());
-            else hr=blurEngine->Attach(s.composition.hwnd,r.right-r.left,r.bottom-r.top,static_cast<float>(params.blurRadius),s.composition);
-            if(FAILED(hr)) { s.composition.Reset(); ClearBlur(); break; }
-            blurSurfaces.push_back(std::move(s));
-            if(!ProtectBlurTaskbar(blurSurfaces.back())) { hr=E_FAIL; ClearBlur(); break; }
-        }
-        if(FAILED(hr)) {
-            wchar_t error[100]; swprintf(error,100,L" · 模糊不可用（0x%08lX），暗角保留",static_cast<unsigned long>(hr));
+        if(!RefreshBlurLayers()) {
+            wchar_t error[100]; swprintf(error,100,L" · 模糊不可用（0x%08lX），暗角保留",static_cast<unsigned long>(blurLastResult));
             message+=error;
+        } else if(blurSurfaces.empty()) {
+            message+=L" · 模糊待命（没有可用显示器）";
         } else {
             UpdateWindowState();
             wchar_t appliedRadius[96];
@@ -727,9 +818,9 @@ bool Rebuild() {
         }
     }
     if(params.saturationEnabled) {
-        if(!RefreshColorLayers()) message+=L" · 壁纸降饱和度不可用，其他效果保留";
+        if(!RefreshColorLayers()) message+=L" · 降饱和度不可用，其他效果保留";
         else if(colorSurfaces.empty()) message+=L" · 降饱和度待命（等待 Wallpaper Engine 壁纸）";
-        else { wchar_t text[64];swprintf(text,64,L" · 壁纸保留饱和度 %.0f%%",params.saturation);message+=text; }
+        else { wchar_t text[96];swprintf(text,96,L" · 饱和度 %.0f%%（%ls）",params.saturation,params.darkenIcons?L"壁纸与图标":L"仅壁纸");message+=text; }
         UpdateWindowState();
     }
     Status(message.c_str()); return true;
@@ -767,8 +858,9 @@ LRESULT CALLBACK SurfaceProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
 void CALLBACK DesktopEvent(HWINEVENTHOOK hook,DWORD event,HWND hwnd,LONG object,LONG,DWORD,DWORD) {
-    if(params.saturationEnabled&&object==OBJID_WINDOW&&hwnd&&
-       (wallpaper_layer::IsWallpaper(hwnd)||std::any_of(colorSurfaces.begin(),colorSurfaces.end(),[&](const ColorSurface& s){return s.layer.wallpaper==hwnd||s.layer.host==hwnd;})))
+    if((params.blurEnabled||params.saturationEnabled)&&object==OBJID_WINDOW&&hwnd&&
+       (wallpaper_layer::IsWallpaper(hwnd)||
+        std::any_of(colorSurfaces.begin(),colorSurfaces.end(),[&](const ColorSurface& s){return s.layer.wallpaper==hwnd||s.layer.host==hwnd;})))
         QueueOnce(ColorHostMessage,colorHostPending);
     if(object==OBJID_WINDOW&&hwnd&&blur_bounds::IsTaskbar(hwnd))
         QueueOnce(BlurBoundsMessage,blurBoundsPending);
@@ -807,13 +899,14 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         DWORD client=static_cast<DWORD>(lp);
         if(wp==104) {
             if(!client||colorSurfaces.empty()) return 0;
-            colorCaptureClient=client;SetTimer(hwnd,7,3000,nullptr);
-            if(!PositionColorSurfaces()) { ClearColor();return 0; }
+            if(wallpaperCaptureClient&&wallpaperCaptureClient!=client) return 0;
+            wallpaperCaptureClient=client;SetTimer(hwnd,7,3000,nullptr);
+            if(!PositionColorSurfaces()) ClearColor();
             return 1;
         }
         if(wp==105) {
-            if(client==colorCaptureClient) {
-                colorCaptureClient=0;KillTimer(hwnd,7);
+            if(client==wallpaperCaptureClient) {
+                wallpaperCaptureClient=0;KillTimer(hwnd,7);
                 if(!PositionColorSurfaces()) ClearColor();
             }
             return 1;
@@ -903,8 +996,16 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             }
         }
         else if(wp==2) { KillTimer(hwnd,2); Rebuild(); }
-        else if(wp==6) { KillTimer(hwnd,6);RefreshColorLayers();UpdateWindowState(); }
-        else if(wp==7) { KillTimer(hwnd,7);colorCaptureClient=0;if(!PositionColorSurfaces()) ClearColor(); }
+        else if(wp==6) {
+            KillTimer(hwnd,6);
+            if(params.blurEnabled) RefreshBlurLayers();
+            if(params.saturationEnabled) RefreshColorLayers();
+            UpdateWindowState();
+        }
+        else if(wp==7) {
+            KillTimer(hwnd,7);wallpaperCaptureClient=0;
+            if(!PositionColorSurfaces()) ClearColor();
+        }
         else if(wp==1 && !paused) {
             HWND previous=desktop;
             bool intact=LocateDesktop() && previous==desktop && !surfaces.empty();
@@ -914,6 +1015,7 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if(intact) for(auto& s:blurSurfaces) if(!IsWindow(s.composition.hwnd)) { intact=false; break; }
             if(!intact) Rebuild();
             else {
+                if(params.blurEnabled) RefreshBlurLayers();
                 UpdateWindowState();
                 for(auto& s:surfaces) PositionSurface(s,true);
                 PositionBlurSurfaces();

@@ -51,7 +51,7 @@ internal static class StartupCheck
             try
             {
                 window.VerifyStartup();
-                File.WriteAllText(report!, "PASS\nPublished WinUI window loaded and visible; Beta 0.6; blur/saturation controls synchronized; commands enabled; settings not written.");
+                File.WriteAllText(report!, "PASS\nPublished WinUI window loaded and visible; v1.7.5; startup label verified; blur/saturation controls synchronized; commands enabled; settings not written.");
             }
             catch (Exception ex) { Failed(ex); }
             finally { window.Close(); }

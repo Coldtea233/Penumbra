@@ -53,10 +53,15 @@ inline std::vector<Layer> Find() {
 }
 inline bool Place(HWND window,const Layer& layer,const RECT& screen,bool visible) {
     if(!visible) { if(IsWindowVisible(window)) ShowWindow(window,SW_HIDE); return true; }
-    if(!IsWindow(window)||!IsWindow(layer.host)||!IsWindow(layer.wallpaper)||GetParent(window)!=layer.host) return false;
+    if(!IsWindow(window)||!IsWindow(layer.host)||!IsWindow(layer.wallpaper)||GetParent(window)!=layer.host) {
+        if(IsWindow(window)) ShowWindow(window,SW_HIDE);
+        return false;
+    }
+    // Explorer can reparent its icon view after a wallpaper/desktop restart.
+    // Stop sampling this branch immediately if it is no longer wallpaper-only.
+    if(FindWindowExW(layer.host,nullptr,L"SHELLDLL_DefView",nullptr)) {ShowWindow(window,SW_HIDE);return false;}
     POINT origin{screen.left,screen.top}; ScreenToClient(layer.host,&origin);
-    HWND foreground=FindWindowExW(layer.host,nullptr,L"SHELLDLL_DefView",nullptr);
-    HWND anchor=foreground?foreground:HWND_TOP;
+    HWND anchor=HWND_TOP;
     RECT current{}; GetWindowRect(window,&current);
     bool inOrder=true,reachesWallpaper=false;
     // Adjacent monitor filters may share a host. They need not each be the
@@ -64,7 +69,7 @@ inline bool Place(HWND window,const Layer& layer,const RECT& screen,bool visible
     // live backdrop every recovery check.
     for(HWND above=GetWindow(window,GW_HWNDPREV);above;above=GetWindow(above,GW_HWNDPREV)) {
         DWORD pid=0;GetWindowThreadProcessId(above,&pid);
-        if(above!=foreground&&pid!=GetCurrentProcessId()) { inOrder=false;break; }
+        if(pid!=GetCurrentProcessId()) { inOrder=false;break; }
     }
     for(HWND below=GetWindow(window,GW_HWNDNEXT);below;below=GetWindow(below,GW_HWNDNEXT)) {
         if(below==layer.wallpaper) { reachesWallpaper=true;break; }

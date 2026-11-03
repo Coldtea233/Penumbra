@@ -1,0 +1,3 @@
+101 ICON "../../assets/branding/AppIcon.ico"
+1 24 "../../installer/Setup.manifest"
+#include "../../installer/SetupDialog.rc"

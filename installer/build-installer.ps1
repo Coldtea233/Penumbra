@@ -1,7 +1,8 @@
 param(
     [string]$Toolchain=$env:LLVM_MINGW_ROOT,
-    [string]$PublishDirectory=(Join-Path $PSScriptRoot '..\dist\Penumbra-Beta-0.6'),
-    [string]$OutputDirectory=(Join-Path $PSScriptRoot '..\dist\release-Beta-0.6')
+    [string]$PublishDirectory=(Join-Path $PSScriptRoot '..\dist\Penumbra-v1.7.5'),
+    [string]$OutputDirectory=(Join-Path $PSScriptRoot '..\dist\release-v1.7.5'),
+    [string]$InstallerVersion='1.7.5'
 )
 $ErrorActionPreference='Stop'
 if(!$Toolchain){throw 'Pass -Toolchain with the llvm-mingw x64 directory.'}
@@ -11,7 +12,18 @@ if(!(Test-Path -LiteralPath (Join-Path $publish 'app\Penumbra.exe'))){throw 'Bui
 New-Item -ItemType Directory -Force -Path $output|Out-Null
 $buildDirectory=Join-Path $output ('build-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $buildDirectory|Out-Null
-$msiPath=Join-Path $output 'Penumbra-Beta-0.6-r1-Setup-x64.msi'
+[xml]$project=Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Nocturne.UI\Nocturne.UI.csproj') -Raw
+$productVersion=([string]$project.Project.PropertyGroup.Version | Where-Object {$_}) -replace '-.*$',''
+if($productVersion -notmatch '^\d+\.\d+\.\d+$'){throw 'Expected a three-part project version.'}
+$applicationVersion=$productVersion
+if($InstallerVersion -notmatch '^\d+\.\d+\.\d+$'){throw 'Expected a three-part installer version.'}
+# Installer-only revisions reuse the verified, unchanged application payload.
+if([version]$InstallerVersion -gt [version]$productVersion){$productVersion=$InstallerVersion}
+$parts=$productVersion.Split('.')
+$displayVersion='Beta '+$parts[0]+'.'+$parts[1]
+if([int]$parts[2] -gt 0){$displayVersion+=' r'+$parts[2]}
+if($productVersion -eq $applicationVersion -and $project.Project.PropertyGroup.InformationalVersion -eq ('v'+$productVersion)){$displayVersion='v'+$productVersion}
+$msiPath=Join-Path $output ('Penumbra-'+$displayVersion.Replace(' ','-')+'-Setup-x64.msi')
 if(Test-Path -LiteralPath $msiPath){throw "Output already exists; choose another directory: $msiPath"}
 
 # Use Windows' own MSI database/cabinet tools; no packager runtime is shipped.
@@ -56,10 +68,10 @@ public static class PenumbraMsi {
    }finally{MsiCloseHandle(record);MsiCloseHandle(view);}
  }
  public static void Codepage(uint database,string directory){Check(MsiDatabaseImport(database,directory,"_ForceCodepage.idt"),"Set database code page");}
- public static void Summary(uint database,string packageCode) {
+ public static void Summary(uint database,string packageCode,string displayVersion) {
    uint summary;Check(MsiGetSummaryInformation(database,null,20,out summary),"Open summary");
    try{Check(MsiSummaryInfoSetProperty(summary,1,2,936,IntPtr.Zero,null),"Code page");
-     var values=new Dictionary<uint,string>{{2,"Penumbra Beta 0.6"},{3,"Desktop vignette, blur and wallpaper saturation utility"},{4,"冷茶Reicha"},{5,"Penumbra;Desktop;Vignette;Blur;Saturation"},{7,"x64;2052"},{9,packageCode}};
+     var values=new Dictionary<uint,string>{{2,"Penumbra "+displayVersion},{3,"Desktop vignette, blur and wallpaper saturation utility"},{4,"冷茶Reicha"},{5,"Penumbra;Desktop;Vignette;Blur;Saturation"},{7,"x64;2052"},{9,packageCode}};
      foreach(var pair in values)Check(MsiSummaryInfoSetProperty(summary,pair.Key,30,0,IntPtr.Zero,pair.Value),"Summary string");
      Check(MsiSummaryInfoSetProperty(summary,14,3,500,IntPtr.Zero,null),"Installer version");
      Check(MsiSummaryInfoSetProperty(summary,15,3,10,IntPtr.Zero,null),"Compressed long filenames, no elevation");
@@ -71,10 +83,17 @@ public static class PenumbraMsi {
 '@
 
 $helper=Join-Path $buildDirectory 'InstallerActions.dll'
-& (Join-Path $Toolchain 'bin\x86_64-w64-mingw32-clang++.exe') (Join-Path $PSScriptRoot 'InstallerActions.cpp') -std=c++17 -Os -static -shared -s -Wall -Wextra -lmsi -ladvapi32 -o $helper
+& (Join-Path $Toolchain 'bin\x86_64-w64-mingw32-clang++.exe') (Join-Path $PSScriptRoot 'InstallerActions.cpp') -std=c++17 -Os -static -shared -s -Wall -Wextra -lmsi -ladvapi32 -lshell32 -lole32 -luuid -o $helper
 if($LASTEXITCODE){throw 'Installer helper compilation failed.'}
 $files=@(Get-ChildItem -LiteralPath $publish -File -Recurse|Sort-Object FullName)
 if(!$files.Count){throw 'Empty payload.'}
+$longestRelative=($files | ForEach-Object {[IO.Path]::GetRelativePath($publish,$_.FullName).Length} | Measure-Object -Maximum).Maximum
+$installPathLimit=[Math]::Min(220,258-[int]$longestRelative)
+if($installPathLimit -lt 40){throw 'Packaged file paths are too long.'}
+foreach($name in @('Penumbra.exe','app\Penumbra.exe','app\Nocturne.Renderer.exe')){
+    $actual=(Get-Item -LiteralPath (Join-Path $publish $name)).VersionInfo
+    if(('{0}.{1}.{2}' -f $actual.FileMajorPart,$actual.FileMinorPart,$actual.FileBuildPart) -ne $applicationVersion){throw "Stale application version: $name"}
+}
 foreach($file in $files){
     if($file.Name -match '^(settings\.ini|animation-trace\.csv|animation-diagnostics\.txt|status\.txt|ui-error\.txt)$' -or $file.Extension -in '.pfx','.key','.pdb'){
         throw "Private/debug file cannot be published: $($file.FullName)"
@@ -134,17 +153,17 @@ try{
     foreach($entry in $schemas.GetEnumerator()){[PenumbraMsi]::Sql($database,('CREATE TABLE `'+$entry.Key+'` ('+$entry.Value+')'))}
     $upgrade='{0CB1971B-FE53-4E66-9699-C87884CB2D4E}'
     $properties=@{
-        ProductCode='{A3864A0C-501E-4498-80A2-B732C09546CE}';UpgradeCode=$upgrade;ProductName='Penumbra';ProductVersion='0.6.1';ProductLanguage='2052';Manufacturer='冷茶Reicha'
-        MSIINSTALLPERUSER='1';LIMITUI='1';ARPNOMODIFY='1';ARPNOREPAIR='1';REBOOT='ReallySuppress';INSTALLLEVEL='1';ARPCOMMENTS='Penumbra Beta 0.6 · 桌面暗角、模糊与壁纸降饱和度';ARPURLINFOABOUT='https://github.com/Coldtea233/Penumbra';SecureCustomProperties='OLDPRODUCTS;NEWERPRODUCTFOUND;INSTALLFOLDER'
+        ProductCode=(StableGuid ('ProductVersion:'+$productVersion));UpgradeCode=$upgrade;ProductName='Penumbra';ProductVersion=$productVersion;ProductLanguage='2052';Manufacturer='冷茶Reicha'
+        MSIINSTALLPERUSER='1';LIMITUI='1';ARPNOMODIFY='1';ARPNOREPAIR='1';REBOOT='ReallySuppress';INSTALLLEVEL='1';ARPCOMMENTS=('Penumbra '+$displayVersion+' · 桌面暗角、模糊与壁纸降饱和度');ARPURLINFOABOUT='https://github.com/Coldtea233/Penumbra';SecureCustomProperties='OLDPRODUCTS;NEWERPRODUCTFOUND;INSTALLFOLDER'
         ARPPRODUCTICON='PenumbraApp.ico'
+        PENUMBRA_PATH_LIMIT=[string]$installPathLimit
+        PENUMBRA_DISPLAY_VERSION=$displayVersion
     }
     foreach($entry in $properties.GetEnumerator()){Row 'Property' @('Property','Value') @($entry.Key,$entry.Value)}
     Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @('TARGETDIR',$null,'SourceDir')
     Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @('LocalAppDataFolder','TARGETDIR','.')
     Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @('UserPrograms','LocalAppDataFolder','Programs')
     Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @('INSTALLFOLDER','UserPrograms','Penumbra')
-    Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @('ProgramMenuFolder','TARGETDIR','.')
-    Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @('MenuFolder','ProgramMenuFolder','Penumbra')
     $directories=@{''='INSTALLFOLDER'}
     $allDirectories=@(Get-ChildItem -LiteralPath $publish -Directory -Recurse|ForEach-Object{[IO.Path]::GetRelativePath($publish,$_.FullName)}|Sort-Object { $_.Length }, { $_ })
     foreach($relative in $allDirectories){
@@ -155,7 +174,7 @@ try{
         Row 'Directory' @('Directory','Directory_Parent','DefaultDir') @($id,$directories[$parent],$alias)
         $directories[$relative]=$id
     }
-    Row 'Feature' @('Feature','Title','Description','Display','Level','Directory_','Attributes') @('Main','Penumbra','桌面暗角、模糊与壁纸降饱和度 Beta 0.6',1,1,'INSTALLFOLDER',0)
+    Row 'Feature' @('Feature','Title','Description','Display','Level','Directory_','Attributes') @('Main','Penumbra',('桌面暗角、模糊与壁纸降饱和度 '+$displayVersion),1,1,'INSTALLFOLDER',0)
     foreach($item in $rows){
         $parent=Split-Path $item.Relative -Parent;$registry='R_'+$item.Id.Substring(2)
         Row 'Component' @('Component','ComponentId','Directory_','Attributes','KeyPath') @($item.Component,(StableGuid $item.Relative),$directories[$parent],260,$registry)
@@ -174,32 +193,31 @@ try{
     $appIcon=Join-Path $publish 'app/Assets/AppIcon.ico'
     if(!(Test-Path -LiteralPath $appIcon)){throw 'Application icon missing from publish directory.'}
     Row 'Icon' @('Name','Data') @('PenumbraApp.ico',([PenumbraMsi+Stream]::new($appIcon)))
-    Row 'Shortcut' @('Shortcut','Directory_','Name','Component_','Target','Description','ShowCmd','WkDir','Icon_','IconIndex') @('StartMenu','MenuFolder','PENUMBRA|Penumbra',$launcher.Component,('[#'+$launcher.Id+']'),'Penumbra Beta 0.6',1,'INSTALLFOLDER','PenumbraApp.ico',0)
-    Row 'RemoveFile' @('FileKey','Component_','DirProperty','InstallMode') @('EmptyMenuFolder',$launcher.Component,'MenuFolder',2)
     Row 'Media' @('DiskId','LastSequence','Cabinet') @(1,[int]$rows.Count,'#payload.cab')
     Row '_Streams' @('Name','Data') @('payload.cab',([PenumbraMsi+Stream]::new((Join-Path $buildDirectory 'payload.cab'))))
     Row 'Binary' @('Name','Data') @('InstallerActions',([PenumbraMsi+Stream]::new($helper)))
-    foreach($action in @(@('CheckEnvironment',1,'CheckEnvironment'),@('PrepareStartupCleanup',1,'PrepareStartupCleanup'),@('RollbackOwnedStartup',1281,'RollbackOwnedStartup'),@('RemoveOwnedStartup',1025,'RemoveOwnedStartup'))){
+    foreach($action in @(@('CheckEnvironment',1,'CheckEnvironment'),@('ResolveInstallDirectory',1,'ResolveInstallDirectory'),@('PrepareStartupMigration',1,'PrepareStartupMigration'),@('MigrateOwnedStartup',1025,'MigrateOwnedStartup'),@('RollbackMigratedStartup',1281,'RollbackMigratedStartup'),@('PrepareStartupCleanup',1,'PrepareStartupCleanup'),@('RollbackOwnedStartup',1281,'RollbackOwnedStartup'),@('RemoveOwnedStartup',1025,'RemoveOwnedStartup'))){
         Row 'CustomAction' @('Action','Type','Source','Target') @($action[0],[int]$action[1],'InstallerActions',$action[2])
     }
-    Row 'Upgrade' @('UpgradeCode','VersionMin','VersionMax','Attributes','ActionProperty') @($upgrade,'0.0.0','0.6.1',257,'OLDPRODUCTS')
-    Row 'Upgrade' @('UpgradeCode','VersionMin','Attributes','ActionProperty') @($upgrade,'0.6.1',258,'NEWERPRODUCTFOUND')
+    Row 'CustomAction' @('Action','Type','Source','Target') @('RememberInstallDirectory',51,'ARPINSTALLLOCATION','[INSTALLFOLDER]')
+    Row 'Upgrade' @('UpgradeCode','VersionMin','VersionMax','Attributes','ActionProperty') @($upgrade,'0.0.0',$productVersion,257,'OLDPRODUCTS')
+    Row 'Upgrade' @('UpgradeCode','VersionMin','Attributes','ActionProperty') @($upgrade,$productVersion,258,'NEWERPRODUCTFOUND')
     Row 'LaunchCondition' @('Condition','Description') @('VersionNT64','Penumbra 需要 64 位 Windows。')
-    Row 'LaunchCondition' @('Condition','Description') @('Installed OR NOT NEWERPRODUCTFOUND','已安装相同或更新版本的 Penumbra，请先从系统设置卸载。')
+    Row 'LaunchCondition' @('Condition','Description') @('Installed OR NOT NEWERPRODUCTFOUND','已安装相同或更新版本的 Penumbra。请使用更新版本的安装程序；同版本重装请使用原安装包。')
     $actions=@(
         @('FindRelatedProducts',$null,25),@('CheckEnvironment',$null,27),@('LaunchConditions',$null,100),@('ValidateProductID',$null,700),
-        @('CostInitialize',$null,800),@('FileCost',$null,900),@('CostFinalize',$null,1000),@('MigrateFeatureStates',$null,1200),@('InstallValidate',$null,1400),
+        @('ResolveInstallDirectory',$null,750),@('CostInitialize',$null,800),@('FileCost',$null,900),@('CostFinalize',$null,1000),@('RememberInstallDirectory',$null,1010),@('PrepareStartupMigration','NOT Installed AND NOT REMOVE',1100),@('MigrateFeatureStates',$null,1200),@('InstallValidate',$null,1400),
         @('InstallInitialize',$null,1500),@('RemoveExistingProducts','OLDPRODUCTS',1501),@('ProcessComponents',$null,1600),@('UnpublishFeatures',$null,1800),
         @('RemoveRegistryValues',$null,2600),@('PrepareStartupCleanup','REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE',2991),
         @('RollbackOwnedStartup','RollbackOwnedStartup',2993),@('RemoveOwnedStartup','RemoveOwnedStartup',2995),
-        @('RemoveShortcuts',$null,3200),@('RemoveFiles',$null,3500),@('CreateFolders',$null,3700),@('InstallFiles',$null,4000),@('CreateShortcuts',$null,4500),
-        @('WriteRegistryValues',$null,5000),@('RegisterUser',$null,6000),@('RegisterProduct',$null,6100),@('PublishFeatures',$null,6300),@('PublishProduct',$null,6400),@('InstallFinalize',$null,6600)
+        @('RemoveFiles',$null,3500),@('CreateFolders',$null,3700),@('InstallFiles',$null,4000),
+        @('WriteRegistryValues',$null,5000),@('RollbackMigratedStartup','RollbackMigratedStartup',5100),@('MigrateOwnedStartup','MigrateOwnedStartup',5110),@('RegisterUser',$null,6000),@('RegisterProduct',$null,6100),@('PublishFeatures',$null,6300),@('PublishProduct',$null,6400),@('InstallFinalize',$null,6600)
     )
     foreach($action in $actions){Row 'InstallExecuteSequence' @('Action','Condition','Sequence') @($action[0],$action[1],[int]$action[2])}
-    foreach($action in @(@('FindRelatedProducts',$null,25),@('CheckEnvironment',$null,27),@('LaunchConditions',$null,100),@('CostInitialize',$null,800),@('FileCost',$null,900),@('CostFinalize',$null,1000),@('ExecuteAction',$null,1300))){
+    foreach($action in @(@('FindRelatedProducts',$null,25),@('CheckEnvironment',$null,27),@('LaunchConditions',$null,100),@('ResolveInstallDirectory',$null,750),@('CostInitialize',$null,800),@('FileCost',$null,900),@('CostFinalize',$null,1000),@('RememberInstallDirectory',$null,1010),@('ExecuteAction',$null,1300))){
         Row 'InstallUISequence' @('Action','Condition','Sequence') @($action[0],$action[1],[int]$action[2])
     }
-    [PenumbraMsi]::Summary($database,('{'+[Guid]::NewGuid().ToString().ToUpperInvariant()+'}'))
+    [PenumbraMsi]::Summary($database,('{'+[Guid]::NewGuid().ToString().ToUpperInvariant()+'}'),$displayVersion)
     [PenumbraMsi]::Check([PenumbraMsi]::MsiDatabaseCommit($database),'Commit MSI')
 }finally{[PenumbraMsi]::MsiCloseHandle($database)|Out-Null}
-Write-Output ([pscustomobject]@{Installer=$msiPath;Files=$rows.Count;PayloadBytes=($files|Measure-Object Length -Sum).Sum;InstallerBytes=(Get-Item -LiteralPath $msiPath).Length;ProductVersion='0.6.1';DisplayVersion='Beta 0.6';PerUser=$true}|ConvertTo-Json -Compress)
+Write-Output ([pscustomobject]@{Installer=$msiPath;Files=$rows.Count;PayloadBytes=($files|Measure-Object Length -Sum).Sum;InstallerBytes=(Get-Item -LiteralPath $msiPath).Length;ProductVersion=$productVersion;DisplayVersion=$displayVersion;InstallPathLimit=$installPathLimit;PerUser=$true}|ConvertTo-Json -Compress)

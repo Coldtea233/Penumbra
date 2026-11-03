@@ -4,7 +4,8 @@ using System.Runtime.InteropServices;
 namespace Nocturne;
 public partial class App : Application
 {
-    private const string SettingsIdentity = "Penumbra.Settings.Beta0.6";
+    // Keep this identity stable across future in-place updates.
+    private const string SettingsIdentity = "Penumbra.Settings";
     private Window? window;
     private Mutex? instance;
     public App()
@@ -39,7 +40,7 @@ public partial class App : Application
                 if (hwnd == IntPtr.Zero) Thread.Sleep(50);
             }
             if (hwnd != IntPtr.Zero) { ShowWindow(hwnd, 9); SetForegroundWindow(hwnd); }
-            else MessageBox(IntPtr.Zero, "已有 Beta 0.6 设置进程，但暂时无法找到窗口。请关闭该设置进程后重试。", "Penumbra", 0x10);
+            else MessageBox(IntPtr.Zero, "已有 Penumbra 设置进程，但暂时无法找到窗口。请关闭该设置进程后重试。", "Penumbra", 0x10);
             Exit();
             return;
         }

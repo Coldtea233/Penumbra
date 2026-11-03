@@ -15,22 +15,22 @@ internal sealed record DesktopSnapshot(byte[] Pixels, int Width, int Height, byt
         var (host, icons) = FindDesktop(sourceWidth, sourceHeight);
         if (!GetWindowRect(host, out var bounds) || bounds.Width <= 0 || bounds.Height <= 0)
             throw new InvalidOperationException("无法读取桌面窗口尺寸。");
-        // This color target is a wallpaper child and therefore appears in a
-        // root capture, unlike the separate vignette/blur popups. Acquire raw
-        // colors once so subsequent slider edits never apply saturation twice.
+        // Saturation lives inside the wallpaper tree; temporarily bypass it.
+        // The desktop blur/vignette popups are outside the captured tree and
+        // do not need hiding (or cause a clear-frame flash) for this snapshot.
         // The native lease times out if capture or the UI process fails.
         var controller = FindWindow("Nocturne.Controller", null);
-        bool rawColor = controller != IntPtr.Zero &&
+        bool rawWallpaper = controller != IntPtr.Zero &&
             SendMessageTimeout(controller, 0x8007, 104, (IntPtr)Environment.ProcessId, 2, 100, out var acknowledged) != IntPtr.Zero && acknowledged == 1;
         WindowCapture.Frame frame;
         try
         {
-            if (rawColor) await Task.Delay(34);
+            if (rawWallpaper) await Task.Delay(34);
             frame = await WindowCapture.CaptureAsync(host);
         }
         finally
         {
-            if (rawColor) SendMessageTimeout(controller, 0x8007, 105, (IntPtr)Environment.ProcessId, 2, 100, out _);
+            if (rawWallpaper) SendMessageTimeout(controller, 0x8007, 105, (IntPtr)Environment.ProcessId, 2, 100, out _);
         }
         int width = 640, height = Math.Clamp((int)Math.Round(640.0 * sourceHeight / sourceWidth), 1, 2560);
         var pixels = ScalePrimary(frame, bounds, sourceWidth, sourceHeight, width, height);

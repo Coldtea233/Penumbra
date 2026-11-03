@@ -13,7 +13,8 @@ static BOOL WINAPI CheckedSetWindowPos(HWND window,HWND after,int x,int y,int wi
     // Deterministic UIPI regression: fail any foreign insert-after reference,
     // even when the machine running the test has no elevated application open.
     if(after!=HWND_TOP&&after!=HWND_BOTTOM&&after!=HWND_TOPMOST&&after!=HWND_NOTOPMOST) {
-        ++foreignAnchorAttempts; SetLastError(ERROR_ACCESS_DENIED); return FALSE;
+        DWORD pid=0; GetWindowThreadProcessId(after,&pid);
+        if(pid!=GetCurrentProcessId()) { ++foreignAnchorAttempts; SetLastError(ERROR_ACCESS_DENIED); return FALSE; }
     }
     return ::SetWindowPos(window,after,x,y,width,height,flags);
 }

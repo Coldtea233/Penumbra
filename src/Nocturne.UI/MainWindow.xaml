@@ -29,7 +29,7 @@
               <TextBlock x:Name="WallpaperEngineLabel" Text="Wallpaper Engine 活动状态" FontSize="14" Foreground="{ThemeResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
             </StackPanel>
           </Grid>
-          <ToggleSwitch x:Name="StartupToggle" Header="登录时启用暗角" OnContent="已开启" OffContent="已关闭"/>
+          <ToggleSwitch x:Name="StartupToggle" Header="登录时自启动" OnContent="已开启" OffContent="已关闭"/>
           <StackPanel x:Name="ExperimentalPanel" Spacing="16" Margin="0,12,0,0">
             <TextBlock x:Name="BlurTitle" Text="实验性功能" FontSize="20" FontWeight="SemiBold"/>
             <StackPanel Spacing="10">
@@ -46,7 +46,7 @@
             </StackPanel>
             <StackPanel x:Name="SaturationSection" Spacing="10">
               <ToggleSwitch x:Name="SaturationEnabledCheckBox" OnContent="已开启" OffContent="已关闭" IsEnabled="False" Toggled="SaturationOption_Changed">
-                <ToggleSwitch.Header><TextBlock Text="窗口成为焦点时降低壁纸饱和度" TextWrapping="Wrap"/></ToggleSwitch.Header>
+                <ToggleSwitch.Header><TextBlock Text="窗口成为焦点时降低饱和度" TextWrapping="Wrap"/></ToggleSwitch.Header>
               </ToggleSwitch>
               <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="112"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

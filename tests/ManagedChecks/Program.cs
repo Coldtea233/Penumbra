@@ -18,6 +18,10 @@ var graySource = PreviewColor.Apply(colorSource, noIcons, 0);
 Check(graySource[0] == graySource[1] && graySource[1] == graySource[2] && graySource[4] == graySource[5] && graySource[5] == graySource[6], "zero percent grayscale");
 Check(graySource[3] == 255 && graySource[7] == 127, "color preview preserves alpha");
 Check(PreviewColor.Apply(colorSource, [0, 1], 0).Skip(4).SequenceEqual(colorSource.Skip(4)), "icons keep original colors");
+Check(PreviewColor.Apply(colorSource, [0, 1], 0, true).SequenceEqual(graySource), "darken-icons option includes icons in desaturation");
+Check(PreviewColor.Apply(colorSource, [0, 1], 100, true).SequenceEqual(colorSource), "100 percent keeps icons unchanged even when included");
+Check(!PreviewColor.Apply(colorSource, [0, 1], 40, true).Skip(4).SequenceEqual(colorSource.Skip(4)), "included icons use the adjustable saturation, not fixed grayscale");
+Check(PreviewColor.Apply(colorSource, [0, 1], 0, false).Skip(4).SequenceEqual(colorSource.Skip(4)), "switching icon inclusion back off restores original icon colors");
 Check(PreviewColor.Apply(colorSource, noIcons, double.NaN).SequenceEqual(colorSource), "nonfinite saturation safely retains original");
 Check(PreviewColor.Apply(colorSource, noIcons, -5).SequenceEqual(graySource) && PreviewColor.Apply(colorSource, noIcons, 105).SequenceEqual(colorSource), "saturation range clamped");
 int priorChroma = -1;
@@ -85,6 +89,30 @@ Check(BlurParameters.PreviewSigma(-1, 640, 2880) == 0 &&
     BlurParameters.PreviewSigma(49, 640, 2880) == BlurParameters.PreviewSigma(48, 640, 2880) &&
     BlurParameters.PreviewSigma(double.NaN, 640, 2880) == BlurParameters.PreviewSigma(12, 640, 2880),
     "preview and desktop use the same clamping and fallback");
+// A sharp icon-shaped punch-out AFTER the Gaussian caused broken edges.
+byte[] desktopImage = new byte[64 * 48 * 4], desktopIcons = new byte[64 * 48];
+for (int i = 3; i < desktopImage.Length; i += 4) desktopImage[i] = 255;
+for (int y = 6; y < 18; y++) for (int x = 6; x < 18; x++)
+{
+    int i = y * 64 + x; desktopIcons[i] = 1;
+    for (int c = 0; c < 3; c++) desktopImage[i * 4 + c] = 240;
+}
+var protectedSettings = defaults with { Opacity = 1, Radius = .05, Feather = .05, DarkenIcons = false, BlurEnabled = true, BlurRadius = 4 };
+var protectedSharp = PreviewEffects.Draw(desktopImage, desktopIcons, 64, 48, protectedSettings, 0, new byte[desktopImage.Length]);
+Check(protectedSharp[(10 * 64 + 10) * 4] == 240, "icon protection preserves original icon brightness before blur");
+var protectedSoft = PreviewEffects.Draw(desktopImage, desktopIcons, 64, 48, protectedSettings, 4, new byte[desktopImage.Length]);
+Check(protectedSoft.SequenceEqual(PreviewBlur.Apply(protectedSharp, 64, 48, 4)), "whole desktop and icon protection use the SAME Gaussian, in correct order");
+Check(protectedSoft[(10 * 64 + 10) * 4] < 240 && protectedSoft[(10 * 64 + 4) * 4] > 0, "icons really blur and spread beyond original icon mask");
+var darkenedSoft = PreviewEffects.Draw(desktopImage, desktopIcons, 64, 48, protectedSettings with { DarkenIcons = true }, 4, new byte[desktopImage.Length]);
+Check(darkenedSoft[(10 * 64 + 10) * 4] < protectedSoft[(10 * 64 + 10) * 4], "darken option changes brightness, never blur coverage");
+var noVignette = PreviewEffects.Draw(desktopImage, desktopIcons, 64, 48, protectedSettings with { Opacity = 0 }, 4, new byte[desktopImage.Length]);
+Check(noVignette.SequenceEqual(PreviewBlur.Apply(desktopImage, 64, 48, 4)), "zero opacity still blurs entire desktop including icons");
+Check(PreviewEffects.Draw(desktopImage, desktopIcons, 64, 48, protectedSettings, 0, new byte[desktopImage.Length]).SequenceEqual(protectedSharp), "zero radius is exactly the protected unblurred desktop");
+for (int radius = 1; radius <= 48; radius++)
+{
+    var actual = PreviewEffects.Draw(desktopImage, desktopIcons, 64, 48, protectedSettings, radius, new byte[desktopImage.Length]);
+    Check(actual.SequenceEqual(PreviewBlur.Apply(protectedSharp, 64, 48, radius)), $"protected icons and background share radius {radius}");
+}
 byte[] fullPreview = new byte[640 * 360 * 4];
 new Random(42).NextBytes(fullPreview);
 for (int i = 3; i < fullPreview.Length; i += 4) fullPreview[i] = 255;

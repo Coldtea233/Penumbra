@@ -33,10 +33,9 @@ public sealed partial class MainWindow : Window
     private bool closeApproved, closePending;
     private WriteableBitmap? previewBitmap;
     private byte[]? previewPixels;
-    private byte[]? blurredPreview;
-    private double blurredPreviewRadius = -1;
     private byte[]? colorPreview;
     private double colorPreviewSaturation = -1;
+    private bool colorPreviewDarkenIcons;
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private static string RendererPath => Path.Combine(AppContext.BaseDirectory, "Nocturne.Renderer.exe");
     public string DisplayVersion => typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion.Split('+')[0];
@@ -197,7 +196,7 @@ public sealed partial class MainWindow : Window
     private void SaturationOption_Changed(object sender, RoutedEventArgs e)
     {
         if (!ready) return;
-        colorPreview = blurredPreview = null;
+        colorPreview = null;
         ScheduleDesktopSaturationPreview();
         SchedulePreviewRender();
     }
@@ -205,7 +204,7 @@ public sealed partial class MainWindow : Window
     {
         if (!ready || updatingSaturationControls) return;
         UpdateSaturationControls();
-        colorPreview = blurredPreview = null;
+        colorPreview = null;
         ScheduleDesktopSaturationPreview();
         SchedulePreviewRender();
     }
@@ -216,7 +215,7 @@ public sealed partial class MainWindow : Window
         try { SaturationSlider.Value = Math.Clamp(Math.Round(e.NewValue), 0, 100); }
         finally { updatingSaturationControls = false; }
         UpdateSaturationControls();
-        colorPreview = blurredPreview = null;
+        colorPreview = null;
         ScheduleDesktopSaturationPreview();
         SchedulePreviewRender();
     }
@@ -244,9 +243,9 @@ public sealed partial class MainWindow : Window
         if (SendSaturationCommand(saturation) == saturation + 1)
         {
             saturationPreviewActive = true;
-            StatusText.Text = $"壁纸饱和度已预览：{saturation}% · 点击应用保存";
+            StatusText.Text = $"饱和度已预览：{saturation}% · 点击应用保存";
         }
-        else StatusText.Text = "壁纸降饱和度尚未启用 · 勾选并点击应用后生效";
+        else StatusText.Text = "降饱和度尚未启用 · 勾选并点击应用后生效";
     }
     private void CancelDesktopSaturationPreview()
     {
@@ -349,7 +348,7 @@ public sealed partial class MainWindow : Window
     {
         CancelDesktopBlurRadiusPreview();
         CancelDesktopSaturationPreview();
-        colorPreview = blurredPreview = null;
+        colorPreview = null;
         LoadControls(new Settings());
         StatusText.Text = "已恢复默认参数";
     }
@@ -408,39 +407,16 @@ public sealed partial class MainWindow : Window
         byte[] source = snapshot.Pixels;
         if (s.SaturationEnabled && wallpaperRunning)
         {
-            if (colorPreview is null || colorPreviewSaturation != s.Saturation)
+            if (colorPreview is null || colorPreviewSaturation != s.Saturation || colorPreviewDarkenIcons != s.DarkenIcons)
             {
-                colorPreview = PreviewColor.Apply(source, snapshot.Icons, s.Saturation);
+                colorPreview = PreviewColor.Apply(source, snapshot.Icons, s.Saturation, s.DarkenIcons);
                 colorPreviewSaturation = s.Saturation;
-                blurredPreview = null;
+                colorPreviewDarkenIcons = s.DarkenIcons;
             }
             source = colorPreview;
         }
-        if (s.BlurEnabled)
-        {
-            if (blurredPreview is null || blurredPreviewRadius != s.BlurRadius)
-            {
-                // Match the unfiltered desktop source, scaled to the small
-                // preview. The CPU filter is a Gaussian approximation only.
-                double sigma = BlurParameters.PreviewSigma(s.BlurRadius, w, GetSystemMetrics(0));
-                blurredPreview = PreviewBlur.Apply(source, w, h, sigma);
-                blurredPreviewRadius = s.BlurRadius;
-            }
-            source = blurredPreview;
-        }
-        int[] tint = s.Tint switch { 1 => [14, 22, 40], 2 => [27, 18, 16], _ => [0, 0, 0] };
-        for (int y = 0; y < h; y++)
-        for (int x = 0; x < w; x++)
-        {
-            double nx = (x + .5) / w, ny = (y + .5) / h;
-            double dx = (nx - s.CenterX) * 2 / s.Shape, dy = (ny - s.CenterY) * 2;
-            double t = Math.Clamp((Math.Sqrt(dx * dx + dy * dy) - s.Radius) / s.Feather, 0, 1);
-            double a = snapshot.Icons[y * w + x] != 0 && !s.DarkenIcons ? 0 : s.Opacity * t * t * (3 - 2 * t);
-            int i = (y * w + x) * 4;
-            pixels[i] = (byte)(source[i] * (1 - a) + tint[2] * a);
-            pixels[i + 1] = (byte)(source[i + 1] * (1 - a) + tint[1] * a);
-            pixels[i + 2] = (byte)(source[i + 2] * (1 - a) + tint[0] * a); pixels[i + 3] = 255;
-        }
+        double sigma = s.BlurEnabled ? BlurParameters.PreviewSigma(s.BlurRadius, w, GetSystemMetrics(0)) : 0;
+        pixels = PreviewEffects.Draw(source, snapshot.Icons, w, h, s, sigma, pixels);
         using (var stream = previewBitmap.PixelBuffer.AsStream())
         {
             stream.Position = 0;
@@ -477,7 +453,8 @@ public sealed partial class MainWindow : Window
     {
         if (!ready || !Root.IsLoaded || !AppWindow.IsVisible || Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
             throw new InvalidOperationException("Settings window was not loaded and visible.");
-        if (DisplayVersion != "Beta 0.6" || BlurTitle.Text != "实验性功能" ||
+        if (DisplayVersion != "v1.7.5" || StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
+            SaturationEnabledCheckBox.Header is not TextBlock saturationTitle || saturationTitle.Text != "窗口成为焦点时降低饱和度" ||
             BlurEnabledCheckBox.Parent is not StackPanel || SaturationEnabledCheckBox.Parent != SaturationSection ||
             !ApplyButton.IsEnabled || !CaptureButton.IsEnabled)
             throw new InvalidOperationException("Version, settings groups or command buttons failed initialization.");
@@ -506,7 +483,6 @@ public sealed partial class MainWindow : Window
         var captured = await DesktopSnapshot.CaptureAsync();
         snapshot = captured;
         colorPreview = null;
-        blurredPreview = null;
         previewAspect = (double)captured.Width / captured.Height;
         ResizePreview();
         PreviewEmpty.Visibility = Visibility.Collapsed;
@@ -526,7 +502,7 @@ public sealed partial class MainWindow : Window
             if (wallpaperRunning != running)
             {
                 wallpaperRunning = running;
-                colorPreview = blurredPreview = null;
+                colorPreview = null;
                 if (!running) CancelDesktopSaturationPreview();
                 SchedulePreviewRender();
             }

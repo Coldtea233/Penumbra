@@ -8,7 +8,7 @@ public static class BrandingUiNative {
  [DllImport("user32.dll")]static extern bool EnumWindows(WindowCallback callback,IntPtr p);
  [DllImport("user32.dll")]static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)]static extern IntPtr GetProp(IntPtr h,string name);
- public static IntPtr SettingsWindow(uint pid){IntPtr found=IntPtr.Zero;EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner==pid&&GetProp(h,"Penumbra.Settings.Beta0.6")!=IntPtr.Zero){found=h;return false;}return true;},IntPtr.Zero);return found;}
+ public static IntPtr SettingsWindow(uint pid){IntPtr found=IntPtr.Zero;EnumWindows((h,p)=>{uint owner;GetWindowThreadProcessId(h,out owner);if(owner==pid&&GetProp(h,"Penumbra.Settings")!=IntPtr.Zero){found=h;return false;}return true;},IntPtr.Zero);return found;}
  [StructLayout(LayoutKind.Sequential)] public struct Rect{public int Left,Top,Right,Bottom;}
  [DllImport("user32.dll")]public static extern bool GetWindowRect(IntPtr h,out Rect r);
  [DllImport("user32.dll")]public static extern bool SetWindowPos(IntPtr h,IntPtr a,int x,int y,int w,int ht,uint f);
@@ -47,7 +47,8 @@ New-Item -ItemType Directory -Force -Path $ScreenshotDirectory | Out-Null
 try{
  foreach($id in @('TitleAppIcon','AboutAppIcon','AboutAppName','AboutVersionText','ProjectLink','DeveloperName','AuthorLabel','BilibiliLink','GitHubLink')){$null=Control $id}
  if((Control 'AboutAppName').Current.Name -ne 'Penumbra'){throw 'Incorrect app name.'}
- if((Control 'AboutVersionText').Current.Name -ne 'Beta 0.6'){throw 'Incorrect displayed version.'}
+ if((Control 'AboutVersionText').Current.Name -ne 'v1.7.5'){throw 'Incorrect displayed version.'}
+ if((Control 'StartupToggle').Current.Name -notlike '*登录时自启动*'){throw 'Startup label was not updated.'}
  if((Control 'BlurTitle').Current.Name -ne '实验性功能'){throw 'Incorrect experimental section title.'}
  if((Control 'SaturationSlider').Current.Name -ne '饱和度'){throw 'Saturation label was not updated.'}
  foreach($id in @('BlurEnabledCheckBox','SaturationEnabledCheckBox')){

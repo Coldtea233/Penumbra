@@ -14,20 +14,18 @@
 #include <msi.h>
 #include <bcrypt.h>
 #include <objbase.h>
+#include <shobjidl.h>
 #include <string>
 #include "SetupConfig.h"
+#include "InstallDiscovery.h"
 
 namespace {
+using namespace penumbra::setup;
 bool quiet=false;
 void Inform(const wchar_t* title,const std::wstring& message,bool error=false) {
     if(quiet) return;
     TaskDialog(nullptr,GetModuleHandleW(nullptr),L"Penumbra 安装程序",title,message.c_str(),TDCBF_OK_BUTTON,
         error?TD_ERROR_ICON:TD_INFORMATION_ICON,nullptr);
-}
-bool Busy(const wchar_t* name) {
-    HANDLE mutex=OpenMutexW(SYNCHRONIZE,FALSE,name);
-    if(mutex) { CloseHandle(mutex); return true; }
-    return GetLastError()==ERROR_ACCESS_DENIED;
 }
 struct TempPayload {
     std::wstring directory,path;
@@ -63,18 +61,109 @@ struct TempPayload {
         CloseHandle(file); return ok;
     }
 };
-bool ConfirmInstall() {
-    std::wstring title=L"安装 Penumbra "; title+=DisplayVersion;
-    TASKDIALOG_BUTTON buttons[]={{100,L"安装"},{IDCANCEL,L"取消"}};
-    TASKDIALOGCONFIG config{}; config.cbSize=sizeof(config);
-    config.hInstance=GetModuleHandleW(nullptr); config.dwFlags=TDF_ALLOW_DIALOG_CANCELLATION|TDF_USE_HICON_MAIN;
-    HICON icon=static_cast<HICON>(LoadImageW(config.hInstance,MAKEINTRESOURCEW(101),IMAGE_ICON,48,48,LR_DEFAULTCOLOR));
-    config.hMainIcon=icon; config.pszWindowTitle=L"Penumbra 安装程序"; config.pszMainInstruction=title.c_str();
-    config.pszContent=L"为当前用户安装桌面暗角与模糊工具。\n\n安装位置：用户目录下的 AppData\\Local\\Programs\\Penumbra\n自动创建开始菜单入口，可在 Windows 设置中卸载。\n\n请先保存参数，关闭设置窗口并从托盘退出后台。升级或卸载不会删除个人配置；安装后不会自动运行或开启登录启动。";
-    config.pButtons=buttons; config.cButtons=2; config.nDefaultButton=100;
-    int clicked=IDCANCEL; HRESULT result=TaskDialogIndirect(&config,&clicked,nullptr,nullptr);
-    if(icon) DestroyIcon(icon);
-    return SUCCEEDED(result)&&clicked==100;
+struct InstallDialog {
+    InstalledProduct installed;
+    std::wstring directory;
+    bool repair=false;
+    CompletionOptions options;
+};
+void SetDialogIcon(HWND window) {
+    auto icon=LoadIconW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(101));
+    SendMessageW(window,WM_SETICON,ICON_BIG,reinterpret_cast<LPARAM>(icon));
+    SendMessageW(window,WM_SETICON,ICON_SMALL,reinterpret_cast<LPARAM>(icon));
+}
+bool LaunchInstalledApplication(HWND owner,const InstallDialog& dialog) {
+    if(!dialog.options.run) return true;
+    std::wstring application=dialog.directory+L"\\Penumbra.exe";
+    SHELLEXECUTEINFOW launch{};launch.cbSize=sizeof(launch);launch.fMask=SEE_MASK_FLAG_NO_UI;launch.hwnd=owner;
+    launch.lpVerb=L"open";launch.lpFile=application.c_str();launch.lpDirectory=dialog.directory.c_str();launch.nShow=SW_SHOWNORMAL;
+    HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+    bool started=ShellExecuteExW(&launch)!=FALSE;
+    if(SUCCEEDED(com)) CoUninitialize();
+    if(started) return true;
+    if(!quiet) MessageBoxW(owner,L"软件已安装，但未能自动打开。可以从安装目录的 Penumbra.exe 启动。",L"未能运行 Penumbra",MB_OK|MB_ICONWARNING);
+    return false;
+}
+INT_PTR CALLBACK CompletionProcedure(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
+    auto* dialog=reinterpret_cast<InstallDialog*>(GetWindowLongPtrW(window,DWLP_USER));
+    if(message==WM_INITDIALOG) {
+        dialog=reinterpret_cast<InstallDialog*>(lParam);SetWindowLongPtrW(window,DWLP_USER,lParam);
+        SetDlgItemTextW(window,1101,(L"Penumbra "+std::wstring(DisplayVersion)+L" 已安装").c_str());
+        SetDlgItemTextW(window,1102,(L"安装位置："+dialog->directory).c_str());
+        CheckDlgButton(window,1110,dialog->options.run?BST_CHECKED:BST_UNCHECKED);
+        SetDialogIcon(window);return TRUE;
+    }
+    if(dialog&&(message==WM_CLOSE||(message==WM_COMMAND&&LOWORD(wParam)==IDOK))) {
+        dialog->options.run=IsDlgButtonChecked(window,1110)==BST_CHECKED;
+        EnableWindow(GetDlgItem(window,IDOK),FALSE);
+        LaunchInstalledApplication(window,*dialog);EndDialog(window,IDOK);
+        return TRUE;
+    }
+    return FALSE;
+}
+bool ValidateDirectory(HWND owner,std::wstring& directory) {
+    std::wstring normalized;
+    if(!NormalizeDirectory(directory,normalized,InstallPathLimit)) {
+        std::wstring message=L"请选择本地磁盘中的有效文件夹（如 D:\\Apps\\Penumbra）。\n不能使用磁盘根目录、网络路径或特殊字符；安装路径最多为 "
+            +std::to_wstring(InstallPathLimit)+L" 个字符。";
+        if(!quiet) MessageBoxW(owner,message.c_str(),L"请检查安装位置",MB_OK|MB_ICONWARNING);
+        return false;
+    }
+    DWORD attributes=GetFileAttributesW(normalized.c_str());
+    std::wstring root=normalized.substr(0,3);
+    UINT drive=GetDriveTypeW(root.c_str());
+    if((attributes!=INVALID_FILE_ATTRIBUTES&&!(attributes&FILE_ATTRIBUTE_DIRECTORY))||
+        (drive!=DRIVE_FIXED&&drive!=DRIVE_REMOVABLE&&drive!=DRIVE_RAMDISK)) {
+        if(!quiet) MessageBoxW(owner,L"安装位置必须位于可用的本地磁盘，且不能与现有文件同名。",L"安装位置不可用",MB_OK|MB_ICONWARNING);
+        return false;
+    }
+    directory=normalized;return true;
+}
+void BrowseDirectory(HWND owner) {
+    IFileOpenDialog* picker=nullptr;
+    if(FAILED(CoCreateInstance(CLSID_FileOpenDialog,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&picker)))) return;
+    DWORD options=0;picker->GetOptions(&options);
+    picker->SetOptions(options|FOS_PICKFOLDERS|FOS_FORCEFILESYSTEM|FOS_PATHMUSTEXIST|FOS_NOCHANGEDIR);
+    picker->SetTitle(L"选择 Penumbra 的安装文件夹");picker->SetOkButtonLabel(L"选择此文件夹");
+    wchar_t text[1024]{};GetDlgItemTextW(owner,1004,text,1024);
+    IShellItem* folder=nullptr;
+    if(SUCCEEDED(SHCreateItemFromParsingName(text,nullptr,IID_PPV_ARGS(&folder)))) {picker->SetFolder(folder);folder->Release();}
+    if(SUCCEEDED(picker->Show(owner))&&SUCCEEDED(picker->GetResult(&folder))) {
+        PWSTR path=nullptr;
+        if(SUCCEEDED(folder->GetDisplayName(SIGDN_FILESYSPATH,&path))) {SetDlgItemTextW(owner,1004,path);CoTaskMemFree(path);}
+        folder->Release();
+    }
+    picker->Release();
+}
+INT_PTR CALLBACK DialogProcedure(HWND window,UINT message,WPARAM wParam,LPARAM lParam) {
+    auto* dialog=reinterpret_cast<InstallDialog*>(GetWindowLongPtrW(window,DWLP_USER));
+    if(message==WM_INITDIALOG) {
+        dialog=reinterpret_cast<InstallDialog*>(lParam);
+        SetWindowLongPtrW(window,DWLP_USER,lParam);
+        std::wstring title=L"Penumbra ";title+=DisplayVersion;SetDlgItemTextW(window,1001,title.c_str());
+        std::wstring description=dialog->installed.code.empty()?L"为当前用户安装":L"已安装 "+dialog->installed.version+L" · "+(dialog->repair?L"重新安装，保留配置":L"覆盖更新，保留配置");
+        SetDlgItemTextW(window,1002,description.c_str());SetDlgItemTextW(window,1004,dialog->directory.c_str());
+        SendDlgItemMessageW(window,1004,EM_SETLIMITTEXT,InstallPathLimit,0);
+        SetDlgItemTextW(window,IDOK,dialog->repair?L"重新安装":(dialog->installed.code.empty()?L"安装":L"更新"));
+        if(dialog->repair) {
+            EnableWindow(GetDlgItem(window,1004),FALSE);EnableWindow(GetDlgItem(window,1005),FALSE);
+            SetDlgItemTextW(window,1006,L"同版本重装沿用现有目录；迁移目录请使用更新版本。");
+        }
+        SetDialogIcon(window);
+        return TRUE;
+    }
+    if(message==WM_CLOSE) {EndDialog(window,IDCANCEL);return TRUE;}
+    if(message==WM_COMMAND&&dialog) {
+        if(LOWORD(wParam)==IDCANCEL) {EndDialog(window,IDCANCEL);return TRUE;}
+        if(LOWORD(wParam)==1005) {BrowseDirectory(window);return TRUE;}
+        if(LOWORD(wParam)==IDOK) {
+            wchar_t text[1024]{};GetDlgItemTextW(window,1004,text,1024);
+            std::wstring directory=text;
+            if(ValidateDirectory(window,directory)) {dialog->directory=directory;EndDialog(window,IDOK);}
+            return TRUE;
+        }
+    }
+    return FALSE;
 }
 }
 int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
@@ -82,19 +171,47 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES}; InitCommonControlsEx(&controls);
     int count=0; LPWSTR* args=CommandLineToArgvW(GetCommandLineW(),&count);
     if(!args) return ERROR_INVALID_PARAMETER;
-    std::wstring extractPath,logPath;
+    std::wstring extractPath,logPath,requestedDirectory;
+    CompletionOptions completion;
     bool valid=true;
     for(int i=1;i<count;i++) {
         if(!_wcsicmp(args[i],L"/quiet")) quiet=true;
         else if(!_wcsicmp(args[i],L"/extract")&&i+1<count) extractPath=args[++i];
         else if(!_wcsicmp(args[i],L"/log")&&i+1<count) logPath=args[++i];
+        else if(!_wcsicmp(args[i],L"/dir")&&i+1<count) requestedDirectory=args[++i];
+        else if(!_wcsicmp(args[i],L"/norun")) completion.run=false;
         else valid=false;
     }
     LocalFree(args);
-    if(!valid) { Inform(L"参数无效",L"支持 /quiet、/log <日志路径> 或 /extract <新的 MSI 文件路径>。",true); return ERROR_INVALID_PARAMETER; }
+    if(!valid) { Inform(L"参数无效",L"支持 /quiet、/dir <安装目录>、/log <日志路径>、/norun 或 /extract <新的 MSI 文件路径>。",true); return ERROR_INVALID_PARAMETER; }
+    InstallDialog dialog{};
+    dialog.options=completion;
     if(extractPath.empty()) {
-        if(!quiet&&!ConfirmInstall()) return ERROR_INSTALL_USEREXIT;
-        if(Busy(L"Local\\Penumbra.Settings.Beta0.6")||Busy(L"Local\\VignFinder.Settings.v3")||Busy(L"Local\\Nocturne.Renderer.v1")) {
+        dialog.installed=FindInstalled();
+        if(!dialog.installed.code.empty()&&CompareVersions(dialog.installed.version,ProductVersion)>0) {
+            Inform(L"已安装更新版本",L"当前已安装 "+dialog.installed.version+L"，不能用此安装程序降级。个人配置未改动。",true);
+            return ERROR_PRODUCT_VERSION;
+        }
+        dialog.repair=_wcsicmp(dialog.installed.code.c_str(),ProductCode)==0;
+        if(!dialog.installed.code.empty()&&!dialog.repair&&CompareVersions(dialog.installed.version,ProductVersion)==0) {
+            Inform(L"已安装相同版本",L"请使用原安装程序重装，或安装更新版本。",true);return ERROR_PRODUCT_VERSION;
+        }
+        dialog.directory=dialog.installed.code.empty()?DefaultDirectory():dialog.installed.directory;
+        if(!requestedDirectory.empty()) {
+            if(!ValidateDirectory(nullptr,requestedDirectory)) return ERROR_INVALID_PARAMETER;
+            if(dialog.repair&&_wcsicmp(requestedDirectory.c_str(),dialog.directory.c_str())) {
+                Inform(L"无法移动同版本安装",L"同版本重装必须沿用现有安装目录。",true);return ERROR_INVALID_PARAMETER;
+            }
+            dialog.directory=requestedDirectory;
+        }
+        if(!quiet) {
+            HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+            INT_PTR result=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(202),nullptr,DialogProcedure,reinterpret_cast<LPARAM>(&dialog));
+            if(SUCCEEDED(com)) CoUninitialize();
+            if(result!=IDOK) return result==-1?ERROR_INSTALL_FAILURE:ERROR_INSTALL_USEREXIT;
+        }
+        if(!ValidateDirectory(nullptr,dialog.directory)) return ERROR_INVALID_PARAMETER;
+        if(ApplicationRunning()) {
             Inform(L"Penumbra 正在运行",L"请先保存参数，关闭 Penumbra 设置窗口，并从托盘退出后台，再重新安装。程序不会强行关闭窗口或丢弃未保存参数。",true);
             return ERROR_INSTALL_ALREADY_RUNNING;
         }
@@ -109,10 +226,17 @@ int WINAPI wWinMain(HINSTANCE,HINSTANCE,PWSTR,int) {
         UINT result=MsiEnableLogW(INSTALLLOGMODE_VERBOSE|INSTALLLOGMODE_ERROR|INSTALLLOGMODE_WARNING|INSTALLLOGMODE_INFO,logPath.c_str(),0);
         if(result!=ERROR_SUCCESS) { Inform(L"日志文件不可写",L"请选择可写的日志文件路径。",true); return static_cast<int>(result); }
     }
-    MsiSetInternalUI(quiet?INSTALLUILEVEL_NONE:static_cast<INSTALLUILEVEL>(INSTALLUILEVEL_BASIC|INSTALLUILEVEL_ENDDIALOG),nullptr);
-    UINT result=MsiInstallProductW(payload.path.c_str(),L"REBOOT=ReallySuppress");
+    MsiSetInternalUI(quiet?INSTALLUILEVEL_NONE:INSTALLUILEVEL_BASIC,nullptr);
+    std::wstring properties=L"REBOOT=ReallySuppress INSTALLFOLDER=\""+dialog.directory+L"\" ADDLOCAL=Main";
+    if(dialog.repair) properties+=L" REINSTALL=ALL REINSTALLMODE=vamus";
+    UINT result=MsiInstallProductW(payload.path.c_str(),properties.c_str());
     if(result==ERROR_SUCCESS||result==ERROR_SUCCESS_REBOOT_REQUIRED) {
-        Inform(L"安装完成",L"可从开始菜单打开 Penumbra。个人配置保持不变。\n\n如需卸载，请在 Windows 设置 → 应用中找到 Penumbra。");
+        // Quiet deployment never launches an interactive process. Normal setup
+        // presents only the optional run checkbox after installation succeeds.
+        if(!quiet) {
+            INT_PTR finished=DialogBoxParamW(GetModuleHandleW(nullptr),MAKEINTRESOURCEW(203),nullptr,CompletionProcedure,reinterpret_cast<LPARAM>(&dialog));
+            if(finished==-1) Inform(L"安装完成",L"软件已安装。完成页无法打开，请从安装目录启动 Penumbra。个人配置保持不变。",true);
+        }
     } else if(result!=ERROR_INSTALL_USEREXIT) {
         Inform(L"安装未完成",L"Windows Installer 返回错误 "+std::to_wstring(result)+L"。请确认旧程序已退出，且没有安装相同或更新版本。可用 /log 参数记录安装日志。",true);
     }

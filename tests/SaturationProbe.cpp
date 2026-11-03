@@ -61,7 +61,38 @@ int main() {
     }
     engine.SetRadius(surface,1); surface.visual->put_Opacity(1); Pump(120);
     if(ReadPixel(200,160)!=plain) failures++;
-    surface.Reset(); DestroyWindow(backing); Pump(100);
+    surface.Reset();
+    // Checked darken-icons mode uses the same desktop popup as production,
+    // above BOTH the wallpaper branch and the separate icon sibling.
+    // Only disposable own windows are sampled; no Explorer settings change.
+    surface.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,
+        wc.lpszClassName,L"Desktop color including icon",WS_POPUP,16,16,640,256,backing,nullptr,wc.hInstance,nullptr);
+    if(!surface.hwnd||!SetLayeredWindowAttributes(surface.hwnd,0,255,LWA_ALPHA)) { DestroyWindow(backing);return 1; }
+    hr=engine.Attach(surface.hwnd,640,256,1,surface,desktop_blur::Filter::Saturation);
+    if(FAILED(hr)) { std::printf("DesktopColorAttach=%08lX %ls\n",static_cast<unsigned long>(hr),engine.stage);surface.Reset();DestroyWindow(backing);return 1; }
+    SetWindowPos(surface.hwnd,HWND_TOPMOST,16,16,640,256,SWP_NOACTIVATE|SWP_SHOWWINDOW);surface.visual->put_Opacity(1);
+    int previousIcon=300,previousWallpaper=300;
+    for(float saturation:{1.f,.75f,.5f,.25f,0.f}) {
+        engine.SetRadius(surface,saturation);Pump(150);
+        auto wallpaperValue=ReadPixel(200,160),iconValue=ReadPixel(48,48);
+        int wallpaperChroma=Chroma(wallpaperValue),iconChroma=Chroma(iconValue);
+        std::printf("IncludingIconsSaturation=%.2f WallpaperChroma=%d IconRGB=%u,%u,%u IconChroma=%d\n",saturation,wallpaperChroma,GetRValue(iconValue),GetGValue(iconValue),GetBValue(iconValue),iconChroma);
+        if(wallpaperChroma>=previousWallpaper||iconChroma>=previousIcon) failures++;
+        if(saturation==1&&(wallpaperValue!=plain||iconValue!=iconPlain)) failures++;
+        if(saturation==0&&(wallpaperChroma>1||iconChroma>1)) failures++;
+        previousIcon=iconChroma;previousWallpaper=wallpaperChroma;
+    }
+    previousIcon=-1;
+    for(float opacity:{1.f,.75f,.5f,.25f,0.f}) {
+        surface.visual->put_Opacity(opacity);Pump(100);int chroma=Chroma(ReadPixel(48,48));
+        std::printf("IncludingIconsFadeOpacity=%.2f IconChroma=%d\n",opacity,chroma);
+        if(chroma<=previousIcon) failures++;previousIcon=chroma;
+    }
+    engine.SetRadius(surface,1);surface.visual->put_Opacity(1);Pump(100);
+    if(ReadPixel(48,48)!=iconPlain) failures++;
+    surface.Reset();Pump(100);
+    if(ReadPixel(48,48)!=iconPlain) failures++;
+    DestroyWindow(backing); Pump(100);
     if(GetForegroundWindow()!=foreground) failures++;
     std::printf("SaturationProbe=%s Failures=%u ForegroundPreserved=%s\n",failures?"FAIL":"PASS",failures,GetForegroundWindow()==foreground?"true":"false");
     return failures?1:0;
