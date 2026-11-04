@@ -1,8 +1,7 @@
 <div align=center>
   <img src="assets/branding/AppIcon.png" width=180 />
-<h1 align="center">Penumbra</h1>
-
-<p align="center"><em>沉浸式桌面</em></p>
+# Penumbra
+### 沉浸式桌面
 
 **为你的桌面添加暗角与模糊，将专注留给前台窗口**
 <div>
