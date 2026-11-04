@@ -1,11 +1,8 @@
 <div align=center>
   <img src="assets/branding/AppIcon.png" width=180 />
-<h1>Penumbra</h1>
-<h1>Penumbra</h1>
-<h1>Penumbra</h1>
-<h1>Penumbra</h1>
+<h1>Penumbra<h1>
 
-**为你的桌面添加暗角与模糊，将专注留给前台窗口**
+**为你的桌面添加暗角与模糊，把专注交给前台窗口**
 <div>
   <img src="https://github.com/user-attachments/assets/fa8d5b00-ac71-4e28-a2b2-a290efa95ec7" width=600/>
 </div>
