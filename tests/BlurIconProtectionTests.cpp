@@ -80,6 +80,24 @@ int main() {
         blurTransition.Reset(true);AdvanceBlurAnimation();
         check(IsWindowVisible(window)&&WindowAbove(window,surfaces.front().hwnd)&&WindowAbove(surfaces.front().hwnd,desktop),"strict order: desktop/icons, protected vignette, then Gaussian");
         check(!blurTimerArmed&&!blurAnimationTick,"visible endpoint has no frame timer");
+        check(current.composition.brushAttached,"visible blur samples its backdrop");
+        float opacityBefore=0;current.composition.visual->get_Opacity(&opacityBefore);
+        current.occluded=true;
+        check(PositionBlurSurfaces()&&!IsWindowVisible(window)&&!current.composition.brushAttached,"occluded monitor hides and detaches the blur graph");
+        for(int radius=0;radius<=48;radius++)
+            check(SetLiveBlurRadius(static_cast<float>(radius))&&!current.composition.brushAttached,"editing radius cannot wake an occluded monitor");
+        check(SetLiveBlurRadius(12),"restore configured radius while occluded");
+        current.occluded=false;
+        check(PositionBlurSurfaces()&&IsWindowVisible(window)&&current.composition.brushAttached,"uncovering restores sampling before the same HWND is shown");
+        float opacityAfter=0;current.composition.visual->get_Opacity(&opacityAfter);
+        check(current.composition.effect.Get()==brush&&current.composition.hwnd==window&&opacityAfter==opacityBefore&&!blurTimerArmed,"unculling preserves objects and settled animation");
+        current.occluded=true;
+        locationHook=moveSizeHook=reinterpret_cast<HWINEVENTHOOK>(1);
+        check(UpdateRenderBudget(ForegroundKind::Transient)&&!current.occluded,"shell UI always restores a previously occluded monitor");
+        current.occluded=true;locationHook=nullptr;
+        check(UpdateRenderBudget(ForegroundKind::Application)&&!current.occluded,"missing location hook disables fullscreen culling safely");
+        moveSizeHook=nullptr;
+        check(PositionBlurSurfaces()&&current.composition.brushAttached,"fail-open policy restores the original graph");
         unsigned placed=placementCalls;
         for(int i=0;i<100;i++) check(PositionSurface(surfaces.front(),true)&&PositionBlurSurfaces(),"unchanged placement succeeds");
         check(placed==placementCalls,"100 unchanged pair checks never restack live backdrop");
@@ -102,7 +120,7 @@ int main() {
             check(window==current.composition.hwnd&&brush==current.composition.effect.Get()&&!blurTimerArmed,"radius edit reuses HWND/brush and no timer");
         }
         check(ControllerProc(nullptr,ColorValueMessage,104,GetCurrentProcessId())==0&&IsWindowVisible(window),"raw wallpaper refresh does not hide unrelated desktop blur");
-        capturingPreview=true;PositionBlurSurfaces();check(!IsWindowVisible(window),"explicit suppression still works");
+        capturingPreview=true;PositionBlurSurfaces();check(!IsWindowVisible(window)&&!current.composition.brushAttached,"explicit suppression hides and detaches sampling");
         capturingPreview=false;PositionSurface(surfaces.front(),true);PositionBlurSurfaces();
         check(IsWindowVisible(window)&&WindowAbove(window,surfaces.front().hwnd),"restoring either layer restores correct order");
         blurTransition.Reset(false);AdvanceBlurAnimation();
@@ -125,6 +143,14 @@ int main() {
         colorSurfaces.push_back(std::move(color));wallpaperProcess=OpenProcess(SYNCHRONIZE,FALSE,GetCurrentProcessId());
         colorTransition.Reset(true);AdvanceColorAnimation();
         check(IsWindowVisible(colorWindow)&&!colorTimerArmed&&!colorAnimationTick,"color is retained at rest without frame timer");
+        auto& retained=colorSurfaces.front();
+        check(retained.composition.brushAttached,"visible color filter samples backdrop");
+        retained.occluded=true;
+        check(PositionColorSurfaces()&&!IsWindowVisible(colorWindow)&&!retained.composition.brushAttached,"fullscreen detaches color with either icon mode");
+        check(SetLiveSaturation(25)&&!retained.composition.brushAttached,"saturation edits stay dormant while fully occluded");
+        retained.occluded=false;
+        check(PositionColorSurfaces()&&IsWindowVisible(colorWindow)&&retained.composition.brushAttached&&retained.composition.effect.Get()==brush,"color unculls without rebuilding or changing icon policy");
+        check(SetLiveSaturation(40),"restore color parameter for remaining regressions");
         if(includeIcons) {
             check(WindowAbove(blurSurfaces.front().composition.hwnd,surfaces.front().hwnd)&&WindowAbove(surfaces.front().hwnd,colorWindow)&&WindowAbove(colorWindow,desktop),"strict color/icons -> vignette -> whole-desktop blur order");
             ::SetWindowPos(colorWindow,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_NOOWNERZORDER);

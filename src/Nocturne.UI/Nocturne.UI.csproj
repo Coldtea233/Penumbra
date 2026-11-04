@@ -1,10 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <Version>1.7.5</Version>
-    <InformationalVersion>v1.7.5</InformationalVersion>
-    <AssemblyVersion>1.7.5.0</AssemblyVersion>
-    <FileVersion>1.7.5.0</FileVersion>
+    <Version>1.7.6</Version>
+    <InformationalVersion>v1.7.6</InformationalVersion>
+    <AssemblyVersion>1.7.6.0</AssemblyVersion>
+    <FileVersion>1.7.6.0</FileVersion>
     <AssemblyName>Penumbra</AssemblyName>
     <Product>Penumbra</Product>
     <Authors>冷茶Reicha</Authors>

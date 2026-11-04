@@ -47,7 +47,7 @@ New-Item -ItemType Directory -Force -Path $ScreenshotDirectory | Out-Null
 try{
  foreach($id in @('TitleAppIcon','AboutAppIcon','AboutAppName','AboutVersionText','ProjectLink','DeveloperName','AuthorLabel','BilibiliLink','GitHubLink')){$null=Control $id}
  if((Control 'AboutAppName').Current.Name -ne 'Penumbra'){throw 'Incorrect app name.'}
- if((Control 'AboutVersionText').Current.Name -ne 'v1.7.5'){throw 'Incorrect displayed version.'}
+ if((Control 'AboutVersionText').Current.Name -ne 'v1.7.6'){throw 'Incorrect displayed version.'}
  if((Control 'StartupToggle').Current.Name -notlike '*登录时自启动*'){throw 'Startup label was not updated.'}
  if((Control 'BlurTitle').Current.Name -ne '实验性功能'){throw 'Incorrect experimental section title.'}
  if((Control 'SaturationSlider').Current.Name -ne '饱和度'){throw 'Saturation label was not updated.'}

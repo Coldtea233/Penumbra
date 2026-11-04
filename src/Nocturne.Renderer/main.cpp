@@ -22,6 +22,8 @@
 #include "blur_bounds.h"
 #include "branding.h"
 #include "wallpaper_layer.h"
+#include "render_budget.h"
+#include "vignette_pixels.h"
 
 // Event-driven at rest. A short-lived timer exists only during a transition.
 constexpr UINT TrayMessage = WM_APP + 1, ReorderMessage = WM_APP + 2, IconMessage = WM_APP + 3, WindowStateMessage = WM_APP + 4, TrayId = 1;
@@ -63,6 +65,9 @@ UINT taskbarCreated;
 branding::TrayIcon trayIcon;
 UINT previewMessage;
 HWINEVENTHOOK foregroundHook{}, minimizeHook{}, reorderHook{}, iconHook{}, windowHook{}, cloakHook{};
+HWINEVENTHOOK locationHook{},moveSizeHook{};
+HWND occlusionMovingWindow{};
+bool occlusionSettling=false;
 std::vector<Surface> surfaces;
 Params params;
 bool paused=false, capturingPreview=false;
@@ -74,7 +79,7 @@ focus_animation::Transition transition;
 struct BlurSurface {
     desktop_blur::Engine::Surface composition;
     RECT rect{}, protectedArea{};
-    bool protectionValid=false;
+    bool protectionValid=false,occluded=false;
 };
 std::unique_ptr<desktop_blur::Engine> blurEngine;
 std::vector<BlurSurface> blurSurfaces;
@@ -86,7 +91,7 @@ bool blurBoundsPending=false;
 HANDLE blurPreviewProcess{};
 DWORD blurPreviewClient=0;
 HRESULT blurLastResult=S_OK;
-struct ColorSurface { desktop_blur::Engine::Surface composition; wallpaper_layer::Layer layer; RECT rect{},safe{}; bool clipped=false,includeIcons=false; };
+struct ColorSurface { desktop_blur::Engine::Surface composition; wallpaper_layer::Layer layer; RECT rect{},safe{}; bool clipped=false,includeIcons=false,occluded=false; };
 std::vector<ColorSurface> colorSurfaces;
 focus_animation::Transition colorTransition;
 HANDLE colorAnimationTick{},colorPreviewProcess{},wallpaperProcess{};
@@ -205,7 +210,7 @@ ForegroundKind ClassifyForeground(HWND foreground) {
     // File Explorer windows are applications, not the desktop itself.
     return ForegroundKind::Application;
 }
-bool IsApplicationWindow(HWND hwnd) {
+bool IsApplicationCandidate(HWND hwnd) {
     if(!IsWindowVisible(hwnd)||IsIconic(hwnd)||GetAncestor(hwnd,GA_ROOT)!=hwnd) return false;
     LONG_PTR extended=GetWindowLongPtrW(hwnd,GWL_EXSTYLE);
     if(extended&(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE)) return false;
@@ -215,7 +220,10 @@ bool IsApplicationWindow(HWND hwnd) {
     screen.right=screen.left+GetSystemMetrics(SM_CXVIRTUALSCREEN);
     screen.bottom=screen.top+GetSystemMetrics(SM_CYVIRTUALSCREEN);
     if(!GetWindowRect(hwnd,&rect)||!IntersectRect(&intersection,&rect,&screen)) return false;
-    return ClassifyForeground(hwnd)==ForegroundKind::Application;
+    return true;
+}
+bool IsApplicationWindow(HWND hwnd) {
+    return IsApplicationCandidate(hwnd)&&ClassifyForeground(hwnd)==ForegroundKind::Application;
 }
 BOOL CALLBACK FindApplicationWindow(HWND hwnd,LPARAM data) {
     if(!IsApplicationWindow(hwnd)) return TRUE;
@@ -226,6 +234,15 @@ bool HasApplicationWindow() {
     bool found=false;
     EnumWindows(FindApplicationWindow,reinterpret_cast<LPARAM>(&found));
     return found;
+}
+struct WindowState { ForegroundKind kind; bool hasWindows; };
+WindowState ReadWindowState(HWND foreground) {
+    ForegroundKind kind=ClassifyForeground(foreground);
+    // A valid foreground app already proves window presence. Share its
+    // classification within this update, with no persistent HWND/PID cache.
+    bool application=kind==ForegroundKind::Application&&IsApplicationCandidate(GetAncestor(foreground,GA_ROOT));
+    if(kind==ForegroundKind::Application&&!application) kind=ForegroundKind::Transient;
+    return {kind,application||HasApplicationWindow()};
 }
 void TraceWindowState(const char* reason) {
     if(!traceAnimation) return;
@@ -397,7 +414,15 @@ bool PositionBlurSurfaces() {
     for(auto& s:blurSurfaces) {
         if(!ProtectBlurTaskbar(s)) { ShowWindow(s.composition.hwnd,SW_HIDE); return false; }
         HWND window=s.composition.hwnd;
-        bool visible=!paused&&!capturingPreview&&(blurTransition.Target()||blurTimerArmed);
+        bool visible=render_budget::ShouldSample(true,!paused&&!capturingPreview&&(blurTransition.Target()||blurTimerArmed),s.occluded);
+        // Remove the actual backdrop graph when hidden/fully occluded. Keeping
+        // only opacity=0 still leaves a live source in the retained visual tree.
+        if(!visible) {
+            if(!PlaceDesktopPopup(window,s.rect,false)) return false;
+            if(!blurEngine||FAILED(blurEngine->SetSampling(s.composition,false))) return false;
+            continue;
+        }
+        if(!blurEngine||FAILED(blurEngine->SetSampling(s.composition,true))) return false;
         if(!PlaceDesktopPopup(window,s.rect,visible)) return false;
     }
     // Recheck the pair on every show/recovery, not just at construction. The
@@ -483,7 +508,14 @@ bool PositionColorSurfaces() {
             if(!SetWindowRgn(s.composition.hwnd,region,FALSE)) { DeleteObject(region); return false; }
             s.safe=safe; s.clipped=true;
         }
-        bool visible=!paused&&!capturingPreview&&!wallpaperCaptureClient&&s.composition.radius<1&&(colorTransition.Target()||colorTimerArmed);
+        bool visible=render_budget::ShouldSample(s.composition.radius<1,
+            !paused&&!capturingPreview&&!wallpaperCaptureClient&&(colorTransition.Target()||colorTimerArmed),s.occluded);
+        if(!visible) {
+            if(IsWindowVisible(s.composition.hwnd)) ShowWindow(s.composition.hwnd,SW_HIDE);
+            if(!blurEngine||FAILED(blurEngine->SetSampling(s.composition,false))) return false;
+            continue;
+        }
+        if(!blurEngine||FAILED(blurEngine->SetSampling(s.composition,true))) return false;
         if(s.includeIcons) {
             if(visible&&(!IsWindow(s.layer.wallpaper)||!IsWindow(s.layer.host))) return false;
             HWND above=nullptr;
@@ -560,8 +592,9 @@ HRESULT CreateColorSurface(ColorSurface& s) {
     if(!s.composition.hwnd) return HRESULT_FROM_WIN32(GetLastError());
     if(s.includeIcons&&!SetLayeredWindowAttributes(s.composition.hwnd,0,255,LWA_ALPHA)) return HRESULT_FROM_WIN32(GetLastError());
     if(!blurEngine) blurEngine=std::make_unique<desktop_blur::Engine>();
-    return blurEngine->Attach(s.composition.hwnd,s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,
+    HRESULT hr=blurEngine->Attach(s.composition.hwnd,s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,
         static_cast<float>(params.saturation/100),s.composition,desktop_blur::Filter::Saturation);
+    return FAILED(hr)?hr:blurEngine->SetSampling(s.composition,false);
 }
 bool RefreshColorLayers() {
     colorLastResult=S_OK;
@@ -610,6 +643,7 @@ HRESULT CreateBlurSurface(BlurSurface& surface) {
     if(!blurEngine) blurEngine=std::make_unique<desktop_blur::Engine>();
     HRESULT hr=blurEngine->Attach(surface.composition.hwnd,rect.right-rect.left,rect.bottom-rect.top,
         static_cast<float>(params.blurRadius),surface.composition);
+    if(SUCCEEDED(hr)) hr=blurEngine->SetSampling(surface.composition,false);
     if(SUCCEEDED(hr)&&!ProtectBlurTaskbar(surface)) hr=E_FAIL;
     return hr;
 }
@@ -655,16 +689,7 @@ bool CreateSurface(Surface& s) {
     return s.hwnd!=nullptr;
 }
 void FillVignette(Bitmap& bitmap) {
-    unsigned char rgb[3]{};
-    if(params.tint==1) { rgb[0]=14; rgb[1]=22; rgb[2]=40; }
-    if(params.tint==2) { rgb[0]=27; rgb[1]=18; rgb[2]=16; }
-    auto* pixel=reinterpret_cast<unsigned char*>(bitmap.pixels);
-    // Premultiplied BGRA required by UpdateLayeredWindow.
-    for(int y=0;y<bitmap.height;y++) for(int x=0;x<bitmap.width;x++) {
-        double a=Alpha(params,(x+.5)/bitmap.width,(y+.5)/bitmap.height);
-        *pixel++=(unsigned char)std::lround(rgb[2]*a); *pixel++=(unsigned char)std::lround(rgb[1]*a);
-        *pixel++=(unsigned char)std::lround(rgb[0]*a); *pixel++=(unsigned char)std::lround(255*a);
-    }
+    vignette_pixels::Fill(bitmap.pixels,bitmap.width,bitmap.height,params);
 }
 void ProtectIcons(Bitmap& bitmap,const RECT& rect) {
     if(params.darkenIcons || iconMask.width<1) return;
@@ -765,17 +790,41 @@ void SetVisibility(bool visible,bool animate=true) {
     nextFrameAt=now;
     AdvanceAnimation();
 }
+bool UpdateRenderBudget(ForegroundKind kind) {
+    bool changed=false;
+    // Missing event hooks, Task View, the taskbar and desktop focus are all
+    // fail-open. A 10-second recovery poll is not fast enough for unculling.
+    if(occlusionMovingWindow&&(!IsWindow(occlusionMovingWindow)||IsIconic(occlusionMovingWindow))) occlusionMovingWindow=nullptr;
+    bool allowed=locationHook&&moveSizeHook&&minimizeHook&&cloakHook&&foregroundHook&&windowHook&&
+        !occlusionMovingWindow&&!occlusionSettling&&kind==ForegroundKind::Application;
+    std::vector<RECT> monitors;
+    if(allowed&&(!blurSurfaces.empty()||!colorSurfaces.empty())) for(const auto& monitor:surfaces)
+        monitors.push_back(monitor.rect);
+    const auto occluded=render_budget::IsMonitorsOccluded(monitors,IsApplicationWindow,desktop);
+    auto covered=[&](const RECT& rect)->bool {
+        for(size_t i=0;i<monitors.size();++i)
+            if(render_budget::Contains(monitors[i],rect)) return occluded[i];
+        return false;
+    };
+    for(auto& s:blurSurfaces) { bool next=covered(s.rect);changed|=s.occluded!=next;s.occluded=next; }
+    for(auto& s:colorSurfaces) { bool next=covered(s.rect);changed|=s.occluded!=next;s.occluded=next; }
+    return changed;
+}
 void UpdateWindowState() {
     TraceWindowState("windows");
     if(paused) return;
     if(!params.focusOnly&&!params.blurEnabled&&!params.saturationEnabled) return;
-    bool hasWindows=HasApplicationWindow();
+    const auto state=ReadWindowState(GetForegroundWindow());
+    bool hasWindows=state.hasWindows;
+    ForegroundKind kind=state.kind;
+    bool budgetChanged=UpdateRenderBudget(kind);
     if(params.focusOnly) SetVisibility(hasWindows);
-    HWND foreground=GetForegroundWindow();
-    ForegroundKind kind=ClassifyForeground(foreground);
-    if(kind==ForegroundKind::Application&&!IsApplicationWindow(GetAncestor(foreground,GA_ROOT))) kind=ForegroundKind::Transient;
     SetBlurVisibility(WantsDesktopBlur(params.blurEnabled,paused,hasWindows,kind,blurTransition.Target()));
     SetColorVisibility(WantsDesktopBlur(params.saturationEnabled,paused,hasWindows,kind,colorTransition.Target()));
+    if(budgetChanged) {
+        if(!PositionBlurSurfaces()) FailBlur();
+        if(!PositionColorSurfaces()) ClearColor();
+    }
 }
 void QueueOnce(UINT message,bool& pending) {
     if(!pending) pending=PostMessageW(controller,message,0,0)!=FALSE;
@@ -858,6 +907,27 @@ LRESULT CALLBACK SurfaceProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
     return DefWindowProcW(hwnd,msg,wp,lp);
 }
 void CALLBACK DesktopEvent(HWINEVENTHOOK hook,DWORD event,HWND hwnd,LONG object,LONG,DWORD,DWORD) {
+    if(hook==locationHook) {
+        // Child accessibility/layout traffic cannot trigger a desktop scan.
+        if(object==OBJID_WINDOW&&hwnd&&GetAncestor(hwnd,GA_ROOT)==hwnd)
+            QueueOnce(WindowStateMessage,windowStatePending);
+        return;
+    }
+    if(hook==moveSizeHook) {
+        occlusionMovingWindow=event==EVENT_SYSTEM_MOVESIZESTART?GetAncestor(hwnd,GA_ROOT):nullptr;
+        QueueOnce(WindowStateMessage,windowStatePending);
+        return;
+    }
+    if(hook==minimizeHook) {
+        // MINIMIZEEND means restoration begins, NOT that minimizing finished.
+        // Eagerly restore sampling for either shell animation, then reconsider
+        // once after it settles. Never wait for a paired event that may be hours
+        // away, and never add a continuous fullscreen/foreground poll.
+        occlusionSettling=true;
+        SetTimer(controller,8,450,nullptr);
+        QueueOnce(WindowStateMessage,windowStatePending);
+        return;
+    }
     if((params.blurEnabled||params.saturationEnabled)&&object==OBJID_WINDOW&&hwnd&&
        (wallpaper_layer::IsWallpaper(hwnd)||
         std::any_of(colorSurfaces.begin(),colorSurfaces.end(),[&](const ColorSurface& s){return s.layer.wallpaper==hwnd||s.layer.host==hwnd;})))
@@ -870,6 +940,13 @@ void CALLBACK DesktopEvent(HWINEVENTHOOK hook,DWORD event,HWND hwnd,LONG object,
         return;
     }
     if(hwnd==iconList || hwnd==icons) { QueueOnce(IconMessage,iconPending); return; }
+    // A fullscreen app can change opacity, styles or its window region without
+    // moving. Re-evaluate only its top-level state, not child control chatter.
+    if(event==EVENT_OBJECT_STATECHANGE&&object==OBJID_WINDOW&&hwnd&&
+       GetAncestor(hwnd,GA_ROOT)==hwnd&&(params.blurEnabled||params.saturationEnabled)) {
+        QueueOnce(WindowStateMessage,windowStatePending);
+        return;
+    }
     if(hook==windowHook||hook==cloakHook) {
         if(object==OBJID_WINDOW&&(!IsWindow(hwnd)||GetAncestor(hwnd,GA_ROOT)==hwnd))
             QueueOnce(WindowStateMessage,windowStatePending);
@@ -1006,6 +1083,9 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             KillTimer(hwnd,7);wallpaperCaptureClient=0;
             if(!PositionColorSurfaces()) ClearColor();
         }
+        else if(wp==8) {
+            KillTimer(hwnd,8);occlusionSettling=false;UpdateWindowState();
+        }
         else if(wp==1 && !paused) {
             HWND previous=desktop;
             bool intact=LocateDesktop() && previous==desktop && !surfaces.empty();
@@ -1136,6 +1216,8 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     minimizeHook=SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART,EVENT_SYSTEM_MINIMIZEEND,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     windowHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_HIDE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     cloakHook=SetWinEventHook(EVENT_OBJECT_CLOAKED,EVENT_OBJECT_UNCLOAKED,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+    locationHook=SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,EVENT_OBJECT_LOCATIONCHANGE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+    moveSizeHook=SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART,EVENT_SYSTEM_MOVESIZEEND,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     reorderHook=SetWinEventHook(EVENT_OBJECT_REORDER,EVENT_OBJECT_REORDER,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     iconHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_NAMECHANGE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     if((!windowHook||!foregroundHook)&&(params.blurEnabled||params.saturationEnabled)) {
@@ -1154,6 +1236,8 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     if(minimizeHook) UnhookWinEvent(minimizeHook);
     if(windowHook) UnhookWinEvent(windowHook);
     if(cloakHook) UnhookWinEvent(cloakHook);
+    if(locationHook) UnhookWinEvent(locationHook);
+    if(moveSizeHook) UnhookWinEvent(moveSizeHook);
     if(reorderHook) UnhookWinEvent(reorderHook);
     if(iconHook) UnhookWinEvent(iconHook);
     Clear(); blurEngine.reset(); trayIcon.Reset();

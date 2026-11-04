@@ -25,7 +25,10 @@
 
 </p>
 
-## 当前版本：v1.7.5
+## 当前版本：v1.7.6
+
+- 模糊和降饱和度隐藏时停止采样；被可确认的不透明全屏窗口完全遮挡的屏幕暂停滤镜，其他屏幕保持实时。
+- 恢复时复用已有图层和参数，不重新播放动画；移动、最小化和还原时提前恢复采样。
 
 - 支持自选安装目录、覆盖更新，并保留原有参数。
 - “压暗桌面图标”不会改变整桌面模糊范围；开启降饱和度后，勾选时图标一起去色，取消则保留原色。
@@ -59,7 +62,7 @@ Windows 合成器另持有每屏透明表面；3840×2160 的 32 位表面约 31
 ./build.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 # 生成内部 Windows Installer 载荷，再打包为对外发布的 EXE
 ./installer/build-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
-./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-v1.7.5/Penumbra-v1.7.5-Setup-x64.msi' -OutputDirectory './dist/release-v1.7.5' -IconPath './assets/branding/AppIcon.ico'
+./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-v1.7.6/Penumbra-v1.7.6-Setup-x64.msi' -OutputDirectory './dist/release-v1.7.6' -IconPath './assets/branding/AppIcon.ico'
 # 原生动画、图标保护、快速反向和资源释放测试，不操作现有应用窗口
 ./tests/run.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 ```

@@ -229,9 +229,11 @@ public:
         ComPtr<C::IInsetClip> clip;
         float radius=-1;
         Filter filter=Filter::Gaussian;
+        bool samplingEnabled=true,brushAttached=false;
         void Reset() {
             if(target) target->put_Root(nullptr);
             properties.Reset(); clip.Reset(); effect.Reset(); visual.Reset(); target.Reset(); radius=-1;
+            samplingEnabled=true;brushAttached=false;
             if(IsWindow(hwnd)) DestroyWindow(hwnd);
             hwnd=nullptr;
         }
@@ -279,17 +281,35 @@ public:
         stage=surface.filter==Filter::Gaussian?L"Gaussian radius property":L"Saturation property";
         HRESULT hr=surface.properties->InsertScalar(String(PropertyName(surface.filter)),radius);
         if(FAILED(hr)) return hr;
-        ComPtr<C::ISpriteVisual> sprite;
-        if(FAILED(hr=surface.visual.As(&sprite))) return hr;
-        ComPtr<C::ICompositionBrush> brush;
-        bool active=surface.filter==Filter::Gaussian?radius>0:radius<1;
-        if(active&&FAILED(hr=surface.effect.As(&brush))) return hr;
-        // Zero bypasses the filter entirely: no residual system blur and no
-        // active backdrop sampling. Keep the graph for instant radius edits.
-        hr=sprite->put_Brush(brush.Get());
-        if(SUCCEEDED(hr)) surface.radius=radius;
+        float previous=surface.radius;surface.radius=radius;
+        hr=UpdateBrush(surface);
+        if(FAILED(hr)) surface.radius=previous;
         return hr;
     }
+    HRESULT SetSampling(Surface& surface,bool enabled) {
+        if(surface.samplingEnabled==enabled) return S_OK;
+        bool previous=surface.samplingEnabled;surface.samplingEnabled=enabled;
+        HRESULT hr=UpdateBrush(surface);
+        if(FAILED(hr)) surface.samplingEnabled=previous;
+        return hr;
+    }
+private:
+    HRESULT UpdateBrush(Surface& surface) {
+        bool active=surface.samplingEnabled&&(surface.filter==Filter::Gaussian?surface.radius>0:surface.radius<1);
+        if(active==surface.brushAttached) return S_OK;
+        ComPtr<C::ISpriteVisual> sprite;
+        HRESULT hr=surface.visual.As(&sprite);
+        if(FAILED(hr)) return hr;
+        ComPtr<C::ICompositionBrush> brush;
+        if(active&&FAILED(hr=surface.effect.As(&brush))) return hr;
+        // Detach the render graph, not just its opacity or HWND visibility.
+        // Cached objects/radius survive so restoring the live desktop costs no
+        // screenshot, GPU readback, texture allocation, or animation reset.
+        hr=sprite->put_Brush(brush.Get());
+        if(SUCCEEDED(hr)) surface.brushAttached=active;
+        return hr;
+    }
+public:
     HRESULT Clip(Surface& surface,const RECT& monitor,const RECT& safe) {
         HRESULT hr;
         if(!surface.clip) {

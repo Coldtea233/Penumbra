@@ -104,6 +104,21 @@ int main() {
             if(opacity==0&&frame.rgb!=plain.rgb) failures++;
             previous=frame.contrast;
         }
+        unsigned restoreChecks=0;
+        for(float opacity:{.25f,.6f,1.f}) {
+            surface.visual->put_Opacity(opacity);Pump(120);auto before=ReadSample();
+            engine.SetSampling(surface,false);Pump(100);
+            if(ReadSample().rgb!=plain.rgb||surface.brushAttached) failures++;
+            // Content/radius changes while sleeping must be observed on wake,
+            // never a frozen screenshot or a replayed full-opacity first frame.
+            PaintPattern(backing,true);engine.SetRadius(surface,12);
+            engine.SetRadius(surface,24);PaintPattern(backing,false);
+            engine.SetSampling(surface,true);Pump(150);auto restored=ReadSample();
+            float actual=0;surface.visual->get_Opacity(&actual);
+            if(restored.rgb!=before.rgb||actual!=opacity||surface.hwnd!=originalWindow||surface.effect.Get()!=originalBrush) failures++;
+            ++restoreChecks;
+        }
+        std::printf("SuspendResumePixelChecks=%u FailuresSoFar=%d\n",restoreChecks,failures);
     }
     surface.Reset(); Pump(100);
     DestroyWindow(backing);

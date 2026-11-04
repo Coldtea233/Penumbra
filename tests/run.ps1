@@ -4,11 +4,11 @@ if(!$Toolchain){throw 'Pass -Toolchain with the llvm-mingw directory.'}
 $Toolchain=(Resolve-Path -LiteralPath $Toolchain).Path
 $testDirectory=Join-Path $PSScriptRoot 'bin'
 New-Item -ItemType Directory -Force $testDirectory|Out-Null
-$testNames=@('DesktopLayeringTests','RendererTests')
+$testNames=@('DesktopLayeringTests','RendererTests','VignettePixelsTests')
 if($InstallerOnly){$testNames=@('InstallerTests')}
-if($WindowEvents){$testNames+='WindowPresenceTests'}
+if($WindowEvents){$testNames+=@('WindowPresenceTests','WindowQueryTests')}
 if($VisualProbe){$testNames+='LayeredOpacityTests'}
-if($Blur){$testNames+=@('TaskbarBoundsTests','BlurStateTests','BlurIconProtectionTests','BlurGeometryTests','BlurProbe')}
+if($Blur){$testNames+=@('RenderBudgetTests','BatchRenderBudgetTests','RenderBudgetEventsTests','EffectSamplingTests','TaskbarBoundsTests','BlurStateTests','BlurIconProtectionTests','BlurGeometryTests','BlurProbe')}
 if($Saturation){$testNames+=@('SaturationStateTests','SaturationProbe')}
 if($Branding){
     if(!$BrandingExecutable){throw 'Pass -BrandingExecutable with the built Nocturne.Renderer.exe.'}

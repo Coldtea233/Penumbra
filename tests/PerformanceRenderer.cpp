@@ -11,6 +11,8 @@ LRESULT CALLBACK PerformanceController(HWND h,UINT m,WPARAM w,LPARAM l) {
         if(!blurSurfaces.empty()&&IsWindowVisible(blurSurfaces.front().composition.hwnd)) state|=4;
         if(blurTimerArmed) state|=8;if(animationTimerArmed) state|=16;
         if(params.blurEnabled) state|=64;if(blurTransition.Target()) state|=128;
+        if(!blurSurfaces.empty()&&blurSurfaces.front().occluded) state|=256;
+        if(!blurSurfaces.empty()&&blurSurfaces.front().composition.brushAttached) state|=512;
         return state;
     }
     return ControllerProc(h,m,w,l);
@@ -36,6 +38,8 @@ int wmain(int argc,wchar_t** argv) {
     minimizeHook=SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART,EVENT_SYSTEM_MINIMIZEEND,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     windowHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_HIDE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     cloakHook=SetWinEventHook(EVENT_OBJECT_CLOAKED,EVENT_OBJECT_UNCLOAKED,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+    locationHook=SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE,EVENT_OBJECT_LOCATIONCHANGE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
+    moveSizeHook=SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART,EVENT_SYSTEM_MOVESIZEEND,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     reorderHook=SetWinEventHook(EVENT_OBJECT_REORDER,EVENT_OBJECT_REORDER,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     iconHook=SetWinEventHook(EVENT_OBJECT_CREATE,EVENT_OBJECT_NAMECHANGE,nullptr,DesktopEvent,0,0,WINEVENT_OUTOFCONTEXT|WINEVENT_SKIPOWNPROCESS);
     if(!controller||!windowHook||!foregroundHook||!Rebuild()||(params.blurEnabled&&blurSurfaces.empty())) {
@@ -44,7 +48,7 @@ int wmain(int argc,wchar_t** argv) {
     UpdateWindowState();SetTimer(controller,1,10000,nullptr);
     std::printf("{\"Width\":%d,\"Height\":%d,\"RefreshHz\":%.1f,\"Blur\":%s,\"Radius\":%.0f,\"DarkenIcons\":false,\"SaturationEnabled\":false,\"UserIniUnchanged\":true}\n",GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),detectedRefreshHz,params.blurEnabled?"true":"false",params.blurRadius);std::fflush(stdout);
     while(DispatchWork()){}
-    for(auto hook:{foregroundHook,minimizeHook,windowHook,cloakHook,reorderHook,iconHook}) if(hook) UnhookWinEvent(hook);
+    for(auto hook:{foregroundHook,minimizeHook,windowHook,cloakHook,reorderHook,iconHook,locationHook,moveSizeHook}) if(hook) UnhookWinEvent(hook);
     Clear();blurEngine.reset();trayIcon.Reset();DestroyWindow(controller);CloseHandle(stopEvent);CloseHandle(reloadEvent);
     return 0;
 }

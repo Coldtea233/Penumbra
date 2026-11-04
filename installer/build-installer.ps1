@@ -1,8 +1,8 @@
 param(
     [string]$Toolchain=$env:LLVM_MINGW_ROOT,
-    [string]$PublishDirectory=(Join-Path $PSScriptRoot '..\dist\Penumbra-v1.7.5'),
-    [string]$OutputDirectory=(Join-Path $PSScriptRoot '..\dist\release-v1.7.5'),
-    [string]$InstallerVersion='1.7.5'
+    [string]$PublishDirectory=(Join-Path $PSScriptRoot '..\dist\Penumbra-v1.7.6'),
+    [string]$OutputDirectory=(Join-Path $PSScriptRoot '..\dist\release-v1.7.6'),
+    [string]$InstallerVersion='1.7.6'
 )
 $ErrorActionPreference='Stop'
 if(!$Toolchain){throw 'Pass -Toolchain with the llvm-mingw x64 directory.'}
