@@ -1,6 +1,6 @@
 <div align=center>
   <img src="assets/branding/AppIcon.png" width=180 />
-<h1>Penumbra<h1>
+<h1>Penumbra<br />沉浸式桌面</h1>
 
 **为你的桌面添加暗角与模糊，把专注交给前台窗口**
 <div>
@@ -8,8 +8,7 @@
 </div>
 沉浸 · 自然 · 聚焦
 
-[下载](https://github.com/Coldtea233/Penumbra/releases) ·
-[反馈问题](https://github.com/Coldtea233/Penumbra/issues)
+**[下载](https://github.com/Coldtea233/Penumbra/releases) · [反馈问题](https://github.com/Coldtea233/Penumbra/issues)**
 
 <div align=left>
 
@@ -20,7 +19,7 @@
 
 ## 效果预览
 
-大家可以使用我的参数喵，模糊半径3px喵，饱和度60%喵，四个暗角参数依次为60、50、100、100喵
+大家可以使用我的参数喵，模糊半径3px，饱和度60%，四个暗角参数依次为60、50、100、100喵
 <p align="center">
   <img width="2880" height="1620" alt="image" src="https://github.com/user-attachments/assets/6636dff0-8c32-4dd5-a07a-c3026a6b61ca" />
 
