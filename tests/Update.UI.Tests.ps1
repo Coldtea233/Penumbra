@@ -29,6 +29,8 @@ try{
     function Verify-Update([string]$message){
         if($ExpectedState -eq 'Available'){
             if($message -notlike '可前往 GitHub*'){throw "Expected an available update: $message"}
+            $scroll=(Control 'SettingsScrollViewer').GetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern)
+            if($scroll.Current.VerticallyScrollable){$scroll.SetScrollPercent(-1,100);Start-Sleep -Milliseconds 150}
             $releaseLink=Control 'UpdateReleaseLink'
             if($releaseLink.Current.Name -ne '在 GitHub 查看新版本' -or $releaseLink.Current.IsOffscreen){throw 'Available update must offer the release page.'}
             if($ExpectedReleaseVersion){
