@@ -17,7 +17,7 @@ if($Branding){
 }
 foreach($testName in $testNames){
     $testExecutable=Join-Path $testDirectory "$testName.exe"
-    $entryOptions=if($testName -eq 'BrandingTests'){@('-municode')}else{@()}
+    [string[]]$entryOptions=if($testName -eq 'BrandingTests'){@('-municode')}else{@()}
     & (Join-Path $Toolchain 'bin\x86_64-w64-mingw32-clang++.exe') (Join-Path $PSScriptRoot "$testName.cpp") -std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -static @entryOptions -luser32 -lgdi32 -lshell32 -lole32 -luuid -lpsapi -ldwmapi -lruntimeobject -lcoremessaging -ladvapi32 -lmsi -o $testExecutable
     if($LASTEXITCODE){throw "Native test compilation failed: $testName"}
     if($testName -eq 'BrandingTests'){& $testExecutable $BrandingExecutable}else{& $testExecutable}

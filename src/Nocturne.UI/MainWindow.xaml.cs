@@ -453,7 +453,7 @@ public sealed partial class MainWindow : Window
     {
         if (!ready || !Root.IsLoaded || !AppWindow.IsVisible || Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
             throw new InvalidOperationException("Settings window was not loaded and visible.");
-        if (DisplayVersion != "v1.7.6" || StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
+        if (DisplayVersion != "v1.8.0" || StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
             SaturationEnabledCheckBox.Header is not TextBlock saturationTitle || saturationTitle.Text != "窗口成为焦点时降低饱和度" ||
             BlurEnabledCheckBox.Parent is not StackPanel || SaturationEnabledCheckBox.Parent != SaturationSection ||
             !ApplyButton.IsEnabled || !CaptureButton.IsEnabled)

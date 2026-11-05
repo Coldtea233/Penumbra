@@ -121,6 +121,23 @@ int main() {
         std::printf("SuspendResumePixelChecks=%u FailuresSoFar=%d\n",restoreChecks,failures);
     }
     surface.Reset(); Pump(100);
+    if(index==7) {
+        PaintPattern(backing,false);
+        unsigned recreated=0;
+        for(const auto& entry:{std::pair<float,int>{12,4},{48,6},{0,0}}) {
+            desktop_blur::Engine::Surface fresh;
+            fresh.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_LAYERED|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT|WS_EX_TOOLWINDOW|WS_EX_TOPMOST,
+                wc.lpszClassName,L"Cached factory pixel probe",WS_POPUP,16,16,640,256,backing,nullptr,wc.hInstance,nullptr);
+            SetLayeredWindowAttributes(fresh.hwnd,0,255,LWA_ALPHA);
+            HRESULT hr=engine.Attach(fresh.hwnd,640,256,entry.first,fresh);
+            if(FAILED(hr)) {++failures;fresh.Reset();continue;}
+            fresh.visual->put_Opacity(1);
+            SetWindowPos(fresh.hwnd,HWND_TOPMOST,16,16,640,256,SWP_NOACTIVATE|SWP_SHOWWINDOW);Pump(200);
+            if(ReadSample().rgb!=samples[entry.second].rgb) ++failures;
+            ++recreated;fresh.Reset();Pump(80);
+        }
+        std::printf("CachedFactoryRecreatedPixelChecks=%u FailuresSoFar=%d\n",recreated,failures);
+    }
     DestroyWindow(backing);
     std::printf("Contrast plain=%.2f r0=%.2f r1=%.2f r2=%.2f r4=%.2f r12=%.2f r24=%.2f r48=%.2f\n",plain.contrast,samples[0].contrast,samples[1].contrast,samples[2].contrast,samples[3].contrast,samples[4].contrast,samples[5].contrast,samples[6].contrast);
     if(index!=7||samples[0].rgb!=plain.rgb||samples[1].contrast<plain.contrast*.93) failures++;

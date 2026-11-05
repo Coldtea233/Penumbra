@@ -25,7 +25,10 @@
 
 </p>
 
-## 当前版本：v1.7.6
+## 当前版本：v1.8.0
+
+- 模糊与降饱和度复用效果工厂，减少多屏和重新应用时的重复初始化，各屏参数及动画仍独立。
+- 暗角生成复用坐标计算，像素结果与原算法一致；保留现有画质、模糊范围及缓出动画。
 
 - 模糊和降饱和度隐藏时停止采样；被可确认的不透明全屏窗口完全遮挡的屏幕暂停滤镜，其他屏幕保持实时。
 - 恢复时复用已有图层和参数，不重新播放动画；移动、最小化和还原时提前恢复采样。
@@ -62,17 +65,17 @@ Windows 合成器另持有每屏透明表面；3840×2160 的 32 位表面约 31
 ./build.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 # 生成内部 Windows Installer 载荷，再打包为对外发布的 EXE
 ./installer/build-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
-./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-v1.7.6/Penumbra-v1.7.6-Setup-x64.msi' -OutputDirectory './dist/release-v1.7.6' -IconPath './assets/branding/AppIcon.ico'
+./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-v1.8.0/Penumbra-v1.8.0-Setup-x64.msi' -OutputDirectory './dist/release-v1.8.0' -IconPath './assets/branding/AppIcon.ico'
 # 原生动画、图标保护、快速反向和资源释放测试，不操作现有应用窗口
 ./tests/run.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 ```
 
-程序产物为 `dist\Penumbra-v1.7.5` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-v1.7.5\Penumbra-v1.7.5-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
+程序产物为 `dist\Penumbra-v1.8.0` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-v1.8.0\Penumbra-v1.8.0-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
 
 ## 发行目录
 
 ```text
-Penumbra-v1.7.5/
+Penumbra-v1.8.0/
   Penumbra.exe   启动入口（启动界面后立即退出，不常驻）
   README.md      使用说明
   app/           程序本体、后台、全部 DLL、语言和头像资源

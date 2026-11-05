@@ -1,4 +1,4 @@
-param([string]$Toolchain = $env:LLVM_MINGW_ROOT, [string]$Configuration = 'Release', [string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist\Penumbra-v1.7.6'), [switch]$NoRestore, [switch]$SkipStartupCheck)
+param([string]$Toolchain = $env:LLVM_MINGW_ROOT, [string]$Configuration = 'Release', [string]$OutputDirectory = (Join-Path $PSScriptRoot 'dist\Penumbra-v1.8.0'), [switch]$NoRestore, [switch]$SkipStartupCheck)
 $ErrorActionPreference = 'Stop'
 if (-not $Toolchain) { throw '请通过 -Toolchain 指定 llvm-mingw 工具链目录，或设置 LLVM_MINGW_ROOT。' }
 $Toolchain = (Resolve-Path -LiteralPath $Toolchain).Path

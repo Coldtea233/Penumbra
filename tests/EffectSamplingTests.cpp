@@ -13,6 +13,14 @@
 #include <cstring>
 #include "../src/Nocturne.Renderer/desktop_blur.h"
 
+namespace desktop_blur {
+struct EngineTestAccess {
+    static C::ICompositionEffectFactory* Factory(const Engine& engine,Filter filter) {
+        return filter==Filter::Gaussian?engine.gaussianFactory.Get():engine.saturationFactory.Get();
+    }
+};
+}
+
 namespace {
 unsigned checks=0,failures=0;
 void Check(bool result,const char* name) {
@@ -45,6 +53,62 @@ double CpuMs() {
     ULARGE_INTEGER k{},u{};k.LowPart=kernel.dwLowDateTime;k.HighPart=kernel.dwHighDateTime;
     u.LowPart=user.dwLowDateTime;u.HighPart=user.dwHighDateTime;
     return (k.QuadPart+u.QuadPart)/10000.;
+}
+float StoredValue(const desktop_blur::Engine::Surface& surface) {
+    float value=-1;desktop_blur::C::CompositionGetValueStatus status{};
+    Check(SUCCEEDED(surface.properties->TryGetScalar(desktop_blur::String(desktop_blur::PropertyName(surface.filter)),&value,&status))&&
+        status==desktop_blur::C::CompositionGetValueStatus_Succeeded,"brush retains its own scalar property");
+    return value;
+}
+void TestFactories(desktop_blur::Engine& engine) {
+    using namespace desktop_blur;
+    Check(!EngineTestAccess::Factory(engine,Filter::Gaussian)&&!EngineTestAccess::Factory(engine,Filter::Saturation),
+        "compiled factories are created lazily, not at process startup");
+    Engine::Surface surfaces[6];
+    const Filter filters[]{Filter::Gaussian,Filter::Saturation,Filter::Gaussian,Filter::Saturation,Filter::Gaussian,Filter::Saturation};
+    const float values[]{0,1,12,.4f,48,0};
+    ComPtr<C::ICompositionEffectFactory> gaussian,saturation;
+    for(int i=0;i<6;++i) {
+        auto& surface=surfaces[i];
+        surface.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,L"STATIC",L"Hidden independent effect test",
+            WS_POPUP,-20000,-20000,32,32,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        HRESULT hr=engine.Attach(surface.hwnd,32,32,values[i],surface,filters[i]);
+        Check(surface.hwnd&&SUCCEEDED(hr),"attach independent real brush from cached factory");
+        if(FAILED(hr)||!surface.hwnd) {for(auto& s:surfaces)s.Reset();return;}
+        auto& factory=filters[i]==Filter::Gaussian?gaussian:saturation;
+        auto actual=EngineTestAccess::Factory(engine,filters[i]);
+        if(!factory) factory=actual;
+        Check(SameObject(factory.Get(),actual),"same filter reuses exactly the same compiled effect factory");
+        Check(StoredValue(surface)==values[i],"fresh brush overrides factory default before exposing the visual");
+        Check(surface.brushAttached==(filters[i]==Filter::Gaussian?values[i]>0:values[i]<1),
+            "cached identity defaults do not force other brushes into bypass");
+        for(int j=0;j<i;++j)
+            Check(!SameObject(surface.effect.Get(),surfaces[j].effect.Get())&&!SameObject(surface.properties.Get(),surfaces[j].properties.Get()),
+                "surfaces never share effect brushes or mutable property sets");
+    }
+    Check(!SameObject(gaussian.Get(),saturation.Get()),"Gaussian and saturation use distinct compiled topologies");
+    Check(SUCCEEDED(engine.SetRadius(surfaces[0],24))&&StoredValue(surfaces[0])==24,"change a brush created from identity-default factory");
+    Check(SUCCEEDED(engine.SetRadius(surfaces[1],.2f))&&StoredValue(surfaces[1])==.2f,"change independent saturation brush");
+    for(int i=2;i<6;++i)Check(StoredValue(surfaces[i])==values[i],"edits never bleed across other monitors or filters");
+    Check(SUCCEEDED(engine.SetSampling(surfaces[2],false))&&!surfaces[2].brushAttached&&surfaces[4].brushAttached,
+        "occluded monitor can sleep without detaching another monitor's graph");
+    for(auto& surface:surfaces) {
+        Check(!IsWindowVisible(surface.hwnd),"factory tests never show or focus windows");
+        surface.Reset();
+    }
+    Check(SameObject(gaussian.Get(),EngineTestAccess::Factory(engine,Filter::Gaussian))&&
+        SameObject(saturation.Get(),EngineTestAccess::Factory(engine,Filter::Saturation)),"rebuilding surfaces retains only the two reusable factories");
+    // Recreate with non-default values after every previous surface is gone.
+    for(int i=0;i<12;++i) {
+        Engine::Surface surface;auto filter=i%2?Filter::Saturation:Filter::Gaussian;
+        float value=i%2?.35f:4.f;
+        surface.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,L"STATIC",L"",
+            WS_POPUP,-20000,-20000,16,16,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
+        HRESULT hr=engine.Attach(surface.hwnd,16,16,value,surface,filter);
+        Check(SUCCEEDED(hr),"repeated apply rebuild uses cached factory");
+        if(SUCCEEDED(hr))Check(StoredValue(surface)==value,"rebuilt brush starts with configured value, not first-ever factory default");
+        surface.Reset();
+    }
 }
 void TestFilter(desktop_blur::Engine& engine,desktop_blur::Filter type) {
     desktop_blur::Engine::Surface surface;
@@ -136,6 +200,7 @@ int main(int argc,char** argv) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     {
         desktop_blur::Engine engine;
+        TestFactories(engine);
         TestFilter(engine,desktop_blur::Filter::Gaussian);
         TestFilter(engine,desktop_blur::Filter::Saturation);
         if(argc>1&&std::strcmp(argv[1],"--benchmark")==0)Benchmark(engine);

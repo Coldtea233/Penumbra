@@ -13,6 +13,7 @@
 #include <windows.graphics.effects.h>
 #include <wrl/client.h>
 #include <atomic>
+#include <utility>
 #include "blur_parameters.h"
 
 namespace desktop_blur {
@@ -171,12 +172,17 @@ class Engine {
     ComPtr<C::ICompositionBrush> backdrop;
     ComPtr<F::IPropertyValueStatics> values;
     ComPtr<SourceFactory> sourceFactory;
+    // Only the compiled topology is shared; each monitor still has an
+    // independent brush, source, property set and animation state.
+    ComPtr<C::ICompositionEffectFactory> gaussianFactory,saturationFactory;
+    friend struct EngineTestAccess;
 public:
     const wchar_t* stage=L"initialization";
     Engine()=default;
     Engine(const Engine&)=delete;
     Engine& operator=(const Engine&)=delete;
     ~Engine() {
+        gaussianFactory.Reset(); saturationFactory.Reset();
         sourceFactory.Reset(); values.Reset(); backdrop.Reset(); interop.Reset();
         if(compositor) {
             ComPtr<F::IClosable> closable;
@@ -219,6 +225,29 @@ private:
         stage=L"source factory";
         return Activate(L"Windows.UI.Composition.CompositionEffectSourceParameter",__uuidof(SourceFactory),reinterpret_cast<void**>(sourceFactory.GetAddressOf()));
     }
+    HRESULT CreateEffectBrush(Filter filter,float radius,C::ICompositionEffectBrush** brush) {
+        auto& cached=filter==Filter::Gaussian?gaussianFactory:saturationFactory;
+        if(!cached) {
+            ComPtr<IInspectable> object;
+            stage=L"source parameter";
+            HRESULT hr=sourceFactory->Create(String(L"Backdrop"),&object);
+            if(FAILED(hr)) return hr;
+            ComPtr<E::IGraphicsEffectSource> input;
+            if(FAILED(hr=object.As(&input))) return hr;
+            ComPtr<E::IGraphicsEffect> effect;
+            float initial=filter==Filter::Gaussian?static_cast<float>(blur_parameters::Sigma(radius)):
+                std::isfinite(radius)?std::clamp(radius,0.f,1.f):1.f;
+            effect.Attach(new Gaussian(input.Get(),values.Get(),initial,filter));
+            ComPtr<PropertyIterable> names;names.Attach(new PropertyNames(filter));
+            ComPtr<C::ICompositionEffectFactory> factory;
+            stage=L"effect factory";
+            hr=compositor->CreateEffectFactoryWithProperties(effect.Get(),names.Get(),&factory);
+            if(FAILED(hr)) return hr;
+            cached=std::move(factory);
+        }
+        stage=L"effect brush";
+        return cached->CreateBrush(brush);
+    }
 public:
     struct Surface {
         HWND hwnd{};
@@ -253,18 +282,7 @@ public:
         stage=L"sprite visual";
         if(FAILED(hr=compositor->CreateSpriteVisual(&sprite))||FAILED(hr=sprite.As(&surface.visual))) return hr;
         if(FAILED(hr=surface.visual->put_Size({static_cast<float>(width),static_cast<float>(height)}))||FAILED(hr=surface.visual->put_Opacity(0))) return hr;
-        object.Reset();
-        stage=L"source parameter";
-        if(FAILED(hr=sourceFactory->Create(String(L"Backdrop"),&object))) return hr;
-        ComPtr<E::IGraphicsEffectSource> input;
-        if(FAILED(hr=object.As(&input))) return hr;
-        ComPtr<E::IGraphicsEffect> effect;
-        float initial=filter==Filter::Gaussian?static_cast<float>(blur_parameters::Sigma(radius)):std::clamp(radius,0.f,1.f);
-        effect.Attach(new Gaussian(input.Get(),values.Get(),initial,filter));
-        ComPtr<C::ICompositionEffectFactory> factory;
-        stage=L"effect factory";
-        ComPtr<PropertyIterable> names; names.Attach(new PropertyNames(filter));
-        if(FAILED(hr=compositor->CreateEffectFactoryWithProperties(effect.Get(),names.Get(),&factory))||FAILED(hr=factory->CreateBrush(&surface.effect))) return hr;
+        if(FAILED(hr=CreateEffectBrush(filter,radius,&surface.effect))) return hr;
         ComPtr<C::ICompositionObject> effectObject;
         if(FAILED(hr=surface.effect.As(&effectObject))||FAILED(hr=effectObject->get_Properties(&surface.properties))) return hr;
         stage=L"effect source";
