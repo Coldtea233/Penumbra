@@ -32,7 +32,7 @@ async Task<UpdateResult> Fixture(string body, HttpStatusCode status = HttpStatus
 }
 
 foreach (var (input, expected) in new[] { ("v1.8.1+commit", "1.8.1"), ("1.8.1", "1.8.1"), ("V1.8.1", "1.8.1"), ("1.8.1+hash", "1.8.1") })
-    Check(UpdateChecker.DisplayVersion(input) == expected, "UI version omits prefix and build metadata");
+    Check(UpdateChecker.DisplayVersion(input) == expected, "comparison version omits prefix and build metadata");
 foreach (string version in new[] { "v1.8.2", "1.8.2", "v1.9.0", "v1.10.0", "v2.0.0", "v10.0.0", "v1.8.2+build.1" })
 {
     var result = await Fixture(Release(version));
@@ -44,7 +44,10 @@ foreach (string version in new[] { "v1.8.1", "1.8.1", "V1.8.1", "v1.8.1+build", 
 {
     var result = await Fixture(Release(version));
     Check(result.State == UpdateState.Current && result.ReleasePage is null, "equal/older version never prompts downgrade " + version);
+    if (UpdateChecker.DisplayVersion(version) == "1.8.1")
+        Check(result.Message == "当前版本已为最新发行版", "latest release uses the requested status wording");
 }
+Check((await Fixture(Release("v1.8.1"), current: "v1.8.1")).Message == "当前版本已为最新发行版", "displayed v prefix still compares correctly");
 Check((await Fixture(Release("v1.9.0"), current: "1.10.0")).State == UpdateState.Current, "numeric, not lexical comparison");
 foreach (string version in new[] { "", "v", "1.8", "1.8.2.0", "1.8.2-beta.1", "1.8.-1", "01.8.2", "1..2", "999999999999.0.0", "1.8.2/../../evil", "https://example.org", " v1.8.2", "v1.8.2 " })
     Check((await Fixture(Release(version))).State == UpdateState.Failed, "invalid tag safely rejected " + version);

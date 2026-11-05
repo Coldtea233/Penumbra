@@ -123,7 +123,7 @@ internal static class UpdateChecker
         var page = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/" + Uri.EscapeDataString(tag));
         if (latest > current)
             return new(UpdateState.Available, "可前往 GitHub 查看更新并下载安装包。更新前请从托盘退出旧版。", latest.ToString(), page);
-        return new(UpdateState.Current, latest == current ? "当前已是最新版本。" : "当前版本高于 GitHub 最新正式发行版。", latest.ToString());
+        return new(UpdateState.Current, latest == current ? "当前版本已为最新发行版" : "当前版本高于 GitHub 最新正式发行版。", latest.ToString());
     }
 
     // Public GitHub latest-release redirect is a low-cost fallback when a

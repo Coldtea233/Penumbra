@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <Version>1.8.1</Version>
-    <InformationalVersion>1.8.1</InformationalVersion>
+    <InformationalVersion>v1.8.1</InformationalVersion>
     <AssemblyVersion>1.8.1.0</AssemblyVersion>
     <FileVersion>1.8.1.0</FileVersion>
     <AssemblyName>Penumbra</AssemblyName>

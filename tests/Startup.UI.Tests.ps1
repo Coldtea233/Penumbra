@@ -29,7 +29,7 @@ try {
         }
         throw "Missing control: $id"
     }
-    if((Control 'AboutVersionText').Current.Name -ne '1.8.1'){throw 'Wrong settings version.'}
+    if((Control 'AboutVersionText').Current.Name -ne 'v1.8.1'){throw 'Wrong settings version.'}
     foreach($id in @('TitleAppIcon','AboutAppIcon','CheckUpdateLink','SaturationEnabledCheckBox','SaturationSlider','SaturationBox','BlurRadiusSlider','ApplyButton','CaptureButton')){$null=Control $id}
     for($attempt=0;$attempt -lt 50 -and !(Control 'ApplyButton').Current.IsEnabled;$attempt++){Start-Sleep -Milliseconds 100}
     if(!(Control 'ApplyButton').Current.IsEnabled){throw 'Settings commands remained disabled after startup.'}
@@ -39,7 +39,7 @@ try {
         Start-Sleep -Milliseconds 100
         $updateHelp=(Control 'CheckUpdateLink').Current.HelpText
     }
-    if($updateHelp -notmatch '当前已是最新|当前版本高于|可前往 GitHub|无法连接 GitHub|连接 GitHub 超时|检查次数已达上限|GitHub 暂时不可用|暂未找到公开|无法识别 GitHub 发行版|更新信息过大|读取更新信息失败|无法解析'){
+    if($updateHelp -notmatch '当前版本已为最新发行版|当前版本高于|可前往 GitHub|无法连接 GitHub|连接 GitHub 超时|检查次数已达上限|GitHub 暂时不可用|暂未找到公开|无法识别 GitHub 发行版|更新信息过大|读取更新信息失败|无法解析'){
         throw 'Startup did not finish or report its single GitHub release check.'
     }
     $again=Start-Process -FilePath $launcher -PassThru -WindowStyle Hidden
@@ -47,7 +47,7 @@ try {
     Start-Sleep -Milliseconds 1500
     $running=@(Get-Process Penumbra -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $expected})
     if($running.Count -ne 1 -or $running[0].Id -ne $app.Id){throw 'Double launch did not retain exactly the same settings instance.'}
-    [pscustomobject]@{Passed=$true;NormalLauncher=$true;WindowVisible=(!$root.Current.IsOffscreen);Version='1.8.1';StartupGitHubCheck=$updateHelp;ControlsLoaded=$true;DoubleLaunchSameInstance=$true;SettingsWritten=$false}|ConvertTo-Json -Compress
+    [pscustomobject]@{Passed=$true;NormalLauncher=$true;WindowVisible=(!$root.Current.IsOffscreen);Version='v1.8.1';StartupGitHubCheck=$updateHelp;ControlsLoaded=$true;DoubleLaunchSameInstance=$true;SettingsWritten=$false}|ConvertTo-Json -Compress
 } finally {
     if($app -and !$app.HasExited){[StartupUiNative]::PostMessage($app.MainWindowHandle,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;$app.WaitForExit(5000)|Out-Null}
     if((Test-Path -LiteralPath $config) -and (Get-FileHash -LiteralPath $config).Hash -ne $hash){throw 'Startup check changed saved settings.'}

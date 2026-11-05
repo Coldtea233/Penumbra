@@ -40,7 +40,7 @@ public sealed partial class MainWindow : Window
     private bool colorPreviewDarkenIcons;
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private static string RendererPath => Path.Combine(AppContext.BaseDirectory, "Nocturne.Renderer.exe");
-    public string DisplayVersion => UpdateChecker.DisplayVersion(typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion);
+    public string DisplayVersion => "v" + UpdateChecker.DisplayVersion(typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion);
     public MainWindow()
     {
         StartupCheck.Stage("MainWindow InitializeComponent begin");
@@ -464,9 +464,9 @@ public sealed partial class MainWindow : Window
     {
         if (!ready || !Root.IsLoaded || !AppWindow.IsVisible || Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
             throw new InvalidOperationException("Settings window was not loaded and visible.");
-        if (DisplayVersion != "1.8.1" || AboutVersionText.Text != DisplayVersion ||
+        if (DisplayVersion != "v1.8.1" || AboutVersionText.Text != DisplayVersion ||
             CheckUpdateLabel.Text != "检查更新" || !CheckUpdateLink.IsEnabled ||
-            CheckUpdateLabel.TextDecorations != Windows.UI.Text.TextDecorations.Underline ||
+            CheckUpdateLabel.TextDecorations != Windows.UI.Text.TextDecorations.None ||
             StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
             SaturationEnabledCheckBox.Header is not TextBlock saturationTitle || saturationTitle.Text != "窗口成为焦点时降低饱和度" ||
             BlurEnabledCheckBox.Parent is not StackPanel || SaturationEnabledCheckBox.Parent != SaturationSection ||
@@ -480,6 +480,21 @@ public sealed partial class MainWindow : Window
             throw new InvalidOperationException("Isolated startup must not start update requests; version and update link must use the same gray.");
         object tooltip = ToolTipService.GetToolTip(CheckUpdateLink);
         string updateHelp = AutomationProperties.GetHelpText(CheckUpdateLink);
+        void VerifyUpdateNoticeAppearance()
+        {
+            UpdateInfoBar.ApplyTemplate();
+            if (!UpdateInfoBar.CornerRadius.Equals(new CornerRadius(12)) ||
+                !UpdateInfoBar.CornerRadius.Equals(AboutCard.CornerRadius) ||
+                !UpdateInfoBar.CornerRadius.Equals(PreviewCard.CornerRadius) ||
+                VisualTreeHelper.GetChildrenCount(UpdateInfoBar) != 1 ||
+                VisualTreeHelper.GetChild(UpdateInfoBar, 0) is not Border contentRoot ||
+                !contentRoot.CornerRadius.Equals(UpdateInfoBar.CornerRadius))
+                throw new InvalidOperationException("Update notice and cards must share the same rounded corners.");
+            if (!new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast &&
+                (contentRoot.Background is not SolidColorBrush noticeBrush ||
+                 !noticeBrush.Color.Equals(Windows.UI.Color.FromArgb(16, 255, 255, 255))))
+                throw new InvalidOperationException("All update results must use the translucent white background, not severity fills.");
+        }
         try
         {
             PresentUpdateResult(new(UpdateState.Failed, "Offline fixture"), automatic: true);
@@ -490,13 +505,17 @@ public sealed partial class MainWindow : Window
             if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.8.2" ||
                 UpdateReleaseLink.NavigateUri != release || UpdateReleaseLink.Visibility != Visibility.Visible)
                 throw new InvalidOperationException("Available updates must offer the correct release page.");
-            PresentUpdateResult(new(UpdateState.Current, "Current fixture"), automatic: false);
+            VerifyUpdateNoticeAppearance();
+            PresentUpdateResult(new(UpdateState.Current, "当前版本已为最新发行版", "1.8.1"), automatic: false);
             if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Severity != InfoBarSeverity.Success ||
+                UpdateInfoBar.Title != "当前版本已为最新发行版" || UpdateInfoBar.Message.Length != 0 ||
                 UpdateReleaseLink.NavigateUri is not null || UpdateReleaseLink.Visibility != Visibility.Collapsed)
                 throw new InvalidOperationException("Manual current result must not retain a stale update link.");
+            VerifyUpdateNoticeAppearance();
             PresentUpdateResult(new(UpdateState.Failed, "Offline fixture"), automatic: false);
             if (UpdateInfoBar.Severity != InfoBarSeverity.Warning || !CheckUpdateLink.IsEnabled)
                 throw new InvalidOperationException("Failed checks must report an error and allow retry.");
+            VerifyUpdateNoticeAppearance();
         }
         finally
         {
@@ -605,10 +624,10 @@ public sealed partial class MainWindow : Window
         UpdateInfoBar.Title = result.State switch
         {
             UpdateState.Available => "发现新版本 " + result.Version,
-            UpdateState.Current => "无需更新",
+            UpdateState.Current => result.Message,
             _ => "检查更新失败"
         };
-        UpdateInfoBar.Message = result.Message;
+        UpdateInfoBar.Message = result.State == UpdateState.Current ? string.Empty : result.Message;
         UpdateInfoBar.Severity = result.State switch
         {
             UpdateState.Current => InfoBarSeverity.Success,
