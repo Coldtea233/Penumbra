@@ -53,7 +53,7 @@ internal static class StartupCheck
             try
             {
                 window.VerifyStartup();
-                File.WriteAllText(report!, "PASS\nPublished WinUI window loaded and visible; v1.8.1; gray update link without underline and result states verified without network; startup label verified; blur/saturation controls synchronized; commands enabled; settings not written.");
+                File.WriteAllText(report!, "PASS\nPublished WinUI window loaded and visible; v1.8.2; gray update link without underline and result states verified without network; startup label verified; blur/saturation controls synchronized; commands enabled; settings not written.");
             }
             catch (Exception ex) { Failed(ex); }
             finally { window.Close(); }

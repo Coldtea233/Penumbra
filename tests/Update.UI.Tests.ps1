@@ -1,8 +1,11 @@
-param([Parameter(Mandatory)][string]$ExecutablePath,[Parameter(Mandatory)][string]$ScreenshotDirectory)
+param([Parameter(Mandatory)][string]$ExecutablePath,[Parameter(Mandatory)][string]$ScreenshotDirectory,
+    [ValidateSet('Current','Available')][string]$ExpectedState='Current',[string]$ExpectedReleaseVersion)
 $ErrorActionPreference='Stop'
 Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $config=Join-Path $env:LOCALAPPDATA 'Nocturne/settings.ini'
 $before=if(Test-Path -LiteralPath $config){(Get-FileHash -LiteralPath $config).Hash}else{''}
+$versionInfo=(Get-Item -LiteralPath $ExecutablePath).VersionInfo
+$expectedVersion='v{0}.{1}.{2}' -f $versionInfo.FileMajorPart,$versionInfo.FileMinorPart,$versionInfo.FileBuildPart
 $app=$null
 try{
     $app=Start-Process -FilePath (Resolve-Path -LiteralPath $ExecutablePath).Path -ArgumentList '--update-test' -PassThru -WindowStyle Hidden
@@ -23,19 +26,32 @@ try{
         }
         throw 'Update check did not complete within the bounded request timeout.'
     }
+    function Verify-Update([string]$message){
+        if($ExpectedState -eq 'Available'){
+            if($message -notlike '可前往 GitHub*'){throw "Expected an available update: $message"}
+            $releaseLink=Control 'UpdateReleaseLink'
+            if($releaseLink.Current.Name -ne '在 GitHub 查看新版本' -or $releaseLink.Current.IsOffscreen){throw 'Available update must offer the release page.'}
+            if($ExpectedReleaseVersion){
+                $title='发现新版本 '+$ExpectedReleaseVersion.TrimStart('v','V')
+                $found=$root.FindFirst([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$title))
+                if(!$found){throw "Missing detected release version: $title"}
+            }
+        }elseif($message -notmatch '当前版本已为最新发行版|当前版本高于'){throw "Expected current version: $message"}
+    }
     $auto=Wait-Update
     & (Join-Path $PSScriptRoot 'Branding.UI.Tests.ps1') -ExecutablePath $ExecutablePath -ScreenshotDirectory $ScreenshotDirectory
-    if($auto -notmatch '当前版本已为最新发行版|当前版本高于'){throw "Live startup did not resolve GitHub version: $auto"}
+    Verify-Update $auto
     $link=Control 'CheckUpdateLink'
     $invoke=$link.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern)
     $invoke.Invoke()
+    Start-Sleep -Milliseconds 150
     $manual=Wait-Update
-    if($manual -notmatch '当前版本已为最新发行版|当前版本高于'){throw "Manual check did not return current version: $manual"}
+    Verify-Update $manual
     $message=$root.FindFirst([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$manual))
     if(!$message){throw 'Manual update check must show an in-app result.'}
     if(!(Control 'ApplyButton').Current.IsEnabled -or !(Control 'CaptureButton').Current.IsEnabled){throw 'Update checking blocked desktop commands.'}
     & (Join-Path $PSScriptRoot 'Branding.UI.Tests.ps1') -ExecutablePath $ExecutablePath -ScreenshotDirectory (Join-Path $ScreenshotDirectory 'manual-result')
-    [pscustomobject]@{Passed=$true;StartupGitHubCheck=$auto;ManualGitHubCheck=$manual;Version='v1.8.1';VersionPrefixPreserved=$true;GrayLinkWithoutUnderline=$true;DesktopCommandsEnabled=$true;SettingsWritten=$false}|ConvertTo-Json -Compress
+    [pscustomobject]@{Passed=$true;StartupGitHubCheck=$auto;ManualGitHubCheck=$manual;Version=$expectedVersion;ExpectedState=$ExpectedState;ExpectedReleaseVersion=$ExpectedReleaseVersion;VersionPrefixPreserved=$true;GrayLinkWithoutUnderline=$true;DesktopCommandsEnabled=$true;SettingsWritten=$false}|ConvertTo-Json -Compress
 }finally{
     if($app -and !$app.HasExited){$null=$app.CloseMainWindow();$null=$app.WaitForExit(5000)}
     $after=if(Test-Path -LiteralPath $config){(Get-FileHash -LiteralPath $config).Hash}else{''}

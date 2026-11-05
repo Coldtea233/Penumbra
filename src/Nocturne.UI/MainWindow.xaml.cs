@@ -464,7 +464,7 @@ public sealed partial class MainWindow : Window
     {
         if (!ready || !Root.IsLoaded || !AppWindow.IsVisible || Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
             throw new InvalidOperationException("Settings window was not loaded and visible.");
-        if (DisplayVersion != "v1.8.1" || AboutVersionText.Text != DisplayVersion ||
+        if (DisplayVersion != "v1.8.2" || AboutVersionText.Text != DisplayVersion ||
             CheckUpdateLabel.Text != "检查更新" || !CheckUpdateLink.IsEnabled ||
             CheckUpdateLabel.TextDecorations != Windows.UI.Text.TextDecorations.None ||
             StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
@@ -500,13 +500,13 @@ public sealed partial class MainWindow : Window
             PresentUpdateResult(new(UpdateState.Failed, "Offline fixture"), automatic: true);
             PresentUpdateResult(new(UpdateState.Current, "Current fixture"), automatic: true);
             if (UpdateInfoBar.IsOpen) throw new InvalidOperationException("Automatic current/error results must remain unobtrusive.");
-            var release = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/v1.8.2");
-            PresentUpdateResult(new(UpdateState.Available, "Available fixture", "1.8.2", release), automatic: true);
-            if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.8.2" ||
+            var release = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/v1.8.3");
+            PresentUpdateResult(new(UpdateState.Available, "Available fixture", "1.8.3", release), automatic: true);
+            if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.8.3" ||
                 UpdateReleaseLink.NavigateUri != release || UpdateReleaseLink.Visibility != Visibility.Visible)
                 throw new InvalidOperationException("Available updates must offer the correct release page.");
             VerifyUpdateNoticeAppearance();
-            PresentUpdateResult(new(UpdateState.Current, "当前版本已为最新发行版", "1.8.1"), automatic: false);
+            PresentUpdateResult(new(UpdateState.Current, "当前版本已为最新发行版", "1.8.2"), automatic: false);
             if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Severity != InfoBarSeverity.Success ||
                 UpdateInfoBar.Title != "当前版本已为最新发行版" || UpdateInfoBar.Message.Length != 0 ||
                 UpdateReleaseLink.NavigateUri is not null || UpdateReleaseLink.Visibility != Visibility.Collapsed)

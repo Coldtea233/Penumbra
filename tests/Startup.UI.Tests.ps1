@@ -9,6 +9,8 @@ public static class StartupUiNative {
 '@
 $launcher=(Resolve-Path -LiteralPath $LauncherPath).Path
 $expected=Join-Path ([IO.Path]::GetDirectoryName($launcher)) 'app\Penumbra.exe'
+$versionInfo=(Get-Item -LiteralPath $expected).VersionInfo
+$expectedVersion='v{0}.{1}.{2}' -f $versionInfo.FileMajorPart,$versionInfo.FileMinorPart,$versionInfo.FileBuildPart
 if(Get-Process Penumbra -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $expected}){throw 'Close the tested build before running the isolated startup check.'}
 $config=Join-Path $env:LOCALAPPDATA 'Nocturne\settings.ini'
 $hash=if(Test-Path -LiteralPath $config){(Get-FileHash -LiteralPath $config).Hash}else{''}
@@ -29,7 +31,7 @@ try {
         }
         throw "Missing control: $id"
     }
-    if((Control 'AboutVersionText').Current.Name -ne 'v1.8.1'){throw 'Wrong settings version.'}
+    if((Control 'AboutVersionText').Current.Name -ne $expectedVersion){throw 'Wrong settings version.'}
     foreach($id in @('TitleAppIcon','AboutAppIcon','CheckUpdateLink','SaturationEnabledCheckBox','SaturationSlider','SaturationBox','BlurRadiusSlider','ApplyButton','CaptureButton')){$null=Control $id}
     for($attempt=0;$attempt -lt 50 -and !(Control 'ApplyButton').Current.IsEnabled;$attempt++){Start-Sleep -Milliseconds 100}
     if(!(Control 'ApplyButton').Current.IsEnabled){throw 'Settings commands remained disabled after startup.'}
@@ -47,7 +49,7 @@ try {
     Start-Sleep -Milliseconds 1500
     $running=@(Get-Process Penumbra -ErrorAction SilentlyContinue | Where-Object {$_.Path -eq $expected})
     if($running.Count -ne 1 -or $running[0].Id -ne $app.Id){throw 'Double launch did not retain exactly the same settings instance.'}
-    [pscustomobject]@{Passed=$true;NormalLauncher=$true;WindowVisible=(!$root.Current.IsOffscreen);Version='v1.8.1';StartupGitHubCheck=$updateHelp;ControlsLoaded=$true;DoubleLaunchSameInstance=$true;SettingsWritten=$false}|ConvertTo-Json -Compress
+    [pscustomobject]@{Passed=$true;NormalLauncher=$true;WindowVisible=(!$root.Current.IsOffscreen);Version=$expectedVersion;StartupGitHubCheck=$updateHelp;ControlsLoaded=$true;DoubleLaunchSameInstance=$true;SettingsWritten=$false}|ConvertTo-Json -Compress
 } finally {
     if($app -and !$app.HasExited){[StartupUiNative]::PostMessage($app.MainWindowHandle,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null;$app.WaitForExit(5000)|Out-Null}
     if((Test-Path -LiteralPath $config) -and (Get-FileHash -LiteralPath $config).Hash -ne $hash){throw 'Startup check changed saved settings.'}

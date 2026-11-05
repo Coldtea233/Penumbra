@@ -1,6 +1,6 @@
 # EXE installer
 
-Installer output: `Penumbra-v1.8.1-Setup-x64.exe`.
+Installer output: `Penumbra-v1.8.2-Setup-x64.exe` (TEST release for validating the update flow).
 
 Build the application, then run `build-installer.ps1` and `build-exe-installer.ps1`. The EXE embeds the complete MSI payload and verifies its SHA-256 before installation; no runtime download is required.
 
