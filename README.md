@@ -8,7 +8,7 @@
 </div>
 沉浸 · 自然 · 聚焦
 
-**[下载](https://github.com/Coldtea233/Penumbra/releases) · [反馈问题](https://github.com/Coldtea233/Penumbra/issues)**
+**[下载最新版 ↗](https://github.com/Coldtea233/Penumbra/releases)  ·  [反馈问题](https://github.com/Coldtea233/Penumbra/issues)**
 
 <div align=left>
 
