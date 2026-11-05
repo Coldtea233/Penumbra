@@ -1,8 +1,8 @@
 param(
     [string]$Toolchain=$env:LLVM_MINGW_ROOT,
-    [string]$PublishDirectory=(Join-Path $PSScriptRoot '..\dist\Penumbra-v1.8.0'),
-    [string]$OutputDirectory=(Join-Path $PSScriptRoot '..\dist\release-v1.8.0'),
-    [string]$InstallerVersion='1.8.0'
+    [string]$PublishDirectory=(Join-Path $PSScriptRoot '..\dist\Penumbra-v1.8.1'),
+    [string]$OutputDirectory=(Join-Path $PSScriptRoot '..\dist\release-v1.8.1'),
+    [string]$InstallerVersion='1.8.1'
 )
 $ErrorActionPreference='Stop'
 if(!$Toolchain){throw 'Pass -Toolchain with the llvm-mingw x64 directory.'}
@@ -22,7 +22,7 @@ if([version]$InstallerVersion -gt [version]$productVersion){$productVersion=$Ins
 $parts=$productVersion.Split('.')
 $displayVersion='Beta '+$parts[0]+'.'+$parts[1]
 if([int]$parts[2] -gt 0){$displayVersion+=' r'+$parts[2]}
-if($productVersion -eq $applicationVersion -and $project.Project.PropertyGroup.InformationalVersion -eq ('v'+$productVersion)){$displayVersion='v'+$productVersion}
+if($productVersion -eq $applicationVersion -and $project.Project.PropertyGroup.InformationalVersion -in @($productVersion,('v'+$productVersion))){$displayVersion='v'+$productVersion}
 $msiPath=Join-Path $output ('Penumbra-'+$displayVersion.Replace(' ','-')+'-Setup-x64.msi')
 if(Test-Path -LiteralPath $msiPath){throw "Output already exists; choose another directory: $msiPath"}
 

@@ -25,7 +25,11 @@
 
 </p>
 
-## 当前版本：v1.8.0
+## 当前版本：v1.8.1
+
+- “关于”里的版本号不再显示 `v`，右侧新增灰色下划线“检查更新”。
+- 每次启动设置界面时异步检查 GitHub 最新正式 Release；发现新版可打开发布页，不自动下载安装，网络失败可手动重试。
+- 更新检查仅在设置进程运行，不增加常驻后台轮询。尚未直接检测 Wallpaper Engine 的焦点暂停选项或实际暂停状态；现有全屏遮挡休眠不等于此功能。
 
 - 模糊与降饱和度复用效果工厂，减少多屏和重新应用时的重复初始化，各屏参数及动画仍独立。
 - 暗角生成复用坐标计算，像素结果与原算法一致；保留现有画质、模糊范围及缓出动画。
@@ -65,17 +69,17 @@ Windows 合成器另持有每屏透明表面；3840×2160 的 32 位表面约 31
 ./build.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 # 生成内部 Windows Installer 载荷，再打包为对外发布的 EXE
 ./installer/build-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
-./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-v1.8.0/Penumbra-v1.8.0-Setup-x64.msi' -OutputDirectory './dist/release-v1.8.0' -IconPath './assets/branding/AppIcon.ico'
+./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-v1.8.1/Penumbra-v1.8.1-Setup-x64.msi' -OutputDirectory './dist/release-v1.8.1' -IconPath './assets/branding/AppIcon.ico'
 # 原生动画、图标保护、快速反向和资源释放测试，不操作现有应用窗口
 ./tests/run.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 ```
 
-程序产物为 `dist\Penumbra-v1.8.0` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-v1.8.0\Penumbra-v1.8.0-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
+程序产物为 `dist\Penumbra-v1.8.1` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-v1.8.1\Penumbra-v1.8.1-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
 
 ## 发行目录
 
 ```text
-Penumbra-v1.8.0/
+Penumbra-v1.8.1/
   Penumbra.exe   启动入口（启动界面后立即退出，不常驻）
   README.md      使用说明
   app/           程序本体、后台、全部 DLL、语言和头像资源
@@ -115,7 +119,7 @@ Penumbra-v1.8.0/
 
 配置与状态：`%LOCALAPPDATA%\Nocturne\settings.ini` 和 `status.txt`。异常时可能写入 `ui-error.txt` / `startup-error.txt`。
 
-程序不会主动联网、不修改壁纸文件；只有主动点击作者主页链接才会交给浏览器打开。桌面预览在打开设置、点击刷新或应用时读取，包含图标，只保留在设置进程内存。捕获目标为桌面窗口树，已有的独立暗角表面与普通应用窗口不属于该窗口树；刷新期间不隐藏暗角、不模拟快捷键、不改变应用窗口状态。
+程序不修改壁纸文件。启动设置窗口或点击“检查更新”时会访问 GitHub 官方 Release API；API 不可用时使用同仓库的官方最新发布链接进行只读检查。不携带账号令牌，不上传配置、桌面图像或使用数据，不自动下载安装；常驻后台不联网检查。主动点击作者主页或更新发布页链接才会交给浏览器打开。桌面预览在打开设置、点击刷新或应用时读取，包含图标，只保留在设置进程内存。捕获目标为桌面窗口树，已有的独立暗角表面与普通应用窗口不属于该窗口树；刷新期间不隐藏暗角、不模拟快捷键、不改变应用窗口状态。
 
 登录启动使用当前用户的 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Nocturne`。移动发行目录后需重新应用此选项；取消勾选并应用可移除启动项，关闭暗角本身不取消登录启动。退出后台后透明表面随进程释放。
 </div>

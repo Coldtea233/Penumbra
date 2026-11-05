@@ -47,7 +47,8 @@ New-Item -ItemType Directory -Force -Path $ScreenshotDirectory | Out-Null
 try{
  foreach($id in @('TitleAppIcon','AboutAppIcon','AboutAppName','AboutVersionText','ProjectLink','DeveloperName','AuthorLabel','BilibiliLink','GitHubLink')){$null=Control $id}
  if((Control 'AboutAppName').Current.Name -ne 'Penumbra'){throw 'Incorrect app name.'}
- if((Control 'AboutVersionText').Current.Name -ne 'v1.8.0'){throw 'Incorrect displayed version.'}
+ if((Control 'AboutVersionText').Current.Name -ne '1.8.1'){throw 'Incorrect displayed version.'}
+ if((Control 'CheckUpdateLink').Current.Name -ne '检查更新'){throw 'Update check link is missing.'}
  if((Control 'StartupToggle').Current.Name -notlike '*登录时自启动*'){throw 'Startup label was not updated.'}
  if((Control 'BlurTitle').Current.Name -ne '实验性功能'){throw 'Incorrect experimental section title.'}
  if((Control 'SaturationSlider').Current.Name -ne '饱和度'){throw 'Saturation label was not updated.'}
@@ -78,6 +79,9 @@ try{
   if($bilibili.Left -le $name.Right -or [Math]::Abs($bilibili.Top-$github.Top) -gt 2 -or $bilibili.Bottom -lt $name.Top -or $bilibili.Top -gt $name.Bottom){throw 'Social buttons must align beside the developer identity without overlap.'}
   $product=(Control 'AboutAppName').Current.BoundingRectangle
   $project=(Control 'ProjectLink').Current.BoundingRectangle
+  $version=(Control 'AboutVersionText').Current.BoundingRectangle
+  $update=(Control 'CheckUpdateLink').Current.BoundingRectangle
+  if($update.Left -lt $version.Right -or $update.Right -gt $project.Left -or [Math]::Abs(($version.Top+$version.Bottom)-($update.Top+$update.Bottom)) -gt 4){throw 'Update link must align after the version without overlapping the project button.'}
   if($project.Left -le $product.Right -or $project.Bottom -lt $product.Top){throw 'Project button must align beside the product identity.'}
   if([Math]::Abs($product.Left-$name.Left) -gt 2){throw 'Product and developer text columns must align.'}
   Screenshot "branding-$mode.png"

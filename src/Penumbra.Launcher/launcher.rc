@@ -2,8 +2,8 @@
 1 24 "launcher.manifest"
 101 ICON "../../assets/branding/AppIcon.ico"
 1 VERSIONINFO
-FILEVERSION 1,8,0,0
-PRODUCTVERSION 1,8,0,0
+FILEVERSION 1,8,1,0
+PRODUCTVERSION 1,8,1,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -12,9 +12,9 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "Penumbra Launcher"
-            VALUE "FileVersion", "1.8.0.0"
+            VALUE "FileVersion", "1.8.1.0"
             VALUE "ProductName", "Penumbra"
-            VALUE "ProductVersion", "v1.8.0"
+            VALUE "ProductVersion", "1.8.1"
         END
     END
     BLOCK "VarFileInfo"

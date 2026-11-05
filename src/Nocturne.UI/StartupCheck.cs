@@ -11,9 +11,11 @@ internal static class StartupCheck
     private static DispatcherQueueTimer? timer;
     internal static bool Enabled => check;
     internal static bool Isolated { get; private set; }
+    internal static bool UpdateCheckRequested { get; private set; }
     internal static void Configure(string[] args)
     {
-        Isolated = args.Contains("--ui-test", StringComparer.Ordinal);
+        UpdateCheckRequested = args.Contains("--update-test", StringComparer.Ordinal);
+        Isolated = UpdateCheckRequested || args.Contains("--ui-test", StringComparer.Ordinal);
         const string prefix = "--startup-check=";
         string? option = args.FirstOrDefault(a => a.StartsWith(prefix, StringComparison.Ordinal));
         check = option is not null;
@@ -51,7 +53,7 @@ internal static class StartupCheck
             try
             {
                 window.VerifyStartup();
-                File.WriteAllText(report!, "PASS\nPublished WinUI window loaded and visible; v1.8.0; startup label verified; blur/saturation controls synchronized; commands enabled; settings not written.");
+                File.WriteAllText(report!, "PASS\nPublished WinUI window loaded and visible; 1.8.1; update link and result states verified without network; startup label verified; blur/saturation controls synchronized; commands enabled; settings not written.");
             }
             catch (Exception ex) { Failed(ex); }
             finally { window.Close(); }

@@ -31,6 +31,8 @@ public sealed partial class MainWindow : Window
     private bool checkingWallpaperStatus;
     private bool windowClosed;
     private bool closeApproved, closePending;
+    private bool startupUpdateChecked, checkingUpdate;
+    private readonly CancellationTokenSource updateCancellation = new();
     private WriteableBitmap? previewBitmap;
     private byte[]? previewPixels;
     private byte[]? colorPreview;
@@ -38,11 +40,13 @@ public sealed partial class MainWindow : Window
     private bool colorPreviewDarkenIcons;
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private static string RendererPath => Path.Combine(AppContext.BaseDirectory, "Nocturne.Renderer.exe");
-    public string DisplayVersion => typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion.Split('+')[0];
+    public string DisplayVersion => UpdateChecker.DisplayVersion(typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion);
     public MainWindow()
     {
         StartupCheck.Stage("MainWindow InitializeComponent begin");
         InitializeComponent();
+        UpdateInfoBar.Closed += (_, _) => UpdateInfoBar.Visibility = Visibility.Collapsed;
+        AutomationProperties.SetHelpText(CheckUpdateLink, "通过 GitHub Releases 检查新版本；启动时自动检查一次。");
         StartupCheck.Stage("MainWindow XAML connected");
         SystemBackdrop = new MicaBackdrop();
         ExtendsContentIntoTitleBar = true;
@@ -88,6 +92,8 @@ public sealed partial class MainWindow : Window
             CancelDesktopBlurRadiusPreview();
             CancelDesktopSaturationPreview();
             windowClosed = true;
+            updateCancellation.Cancel();
+            updateCancellation.Dispose();
             wallpaperStatusTimer.Stop();
             previewTimer?.Stop();
             windowSizing.Dispose();
@@ -439,6 +445,11 @@ public sealed partial class MainWindow : Window
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         StartupCheck.Stage("MainWindow Loaded");
+        if ((!StartupCheck.Isolated || StartupCheck.UpdateCheckRequested) && !startupUpdateChecked)
+        {
+            startupUpdateChecked = true;
+            _ = CheckForUpdatesAsync(automatic: true);
+        }
         if (StartupCheck.Isolated) return;
         wallpaperStatusTimer.Start();
         _ = RefreshWallpaperStatusAsync();
@@ -453,13 +464,47 @@ public sealed partial class MainWindow : Window
     {
         if (!ready || !Root.IsLoaded || !AppWindow.IsVisible || Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
             throw new InvalidOperationException("Settings window was not loaded and visible.");
-        if (DisplayVersion != "v1.8.0" || StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
+        if (DisplayVersion != "1.8.1" || AboutVersionText.Text != DisplayVersion ||
+            CheckUpdateLabel.Text != "检查更新" || !CheckUpdateLink.IsEnabled ||
+            CheckUpdateLabel.TextDecorations != Windows.UI.Text.TextDecorations.Underline ||
+            StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
             SaturationEnabledCheckBox.Header is not TextBlock saturationTitle || saturationTitle.Text != "窗口成为焦点时降低饱和度" ||
             BlurEnabledCheckBox.Parent is not StackPanel || SaturationEnabledCheckBox.Parent != SaturationSection ||
             !ApplyButton.IsEnabled || !CaptureButton.IsEnabled)
             throw new InvalidOperationException("Version, settings groups or command buttons failed initialization.");
         if (SaturationBox.Value != SaturationSlider.Value || BlurRadiusBox.Value != BlurRadiusSlider.Value)
             throw new InvalidOperationException("Settings number fields were not initialized from their sliders.");
+        if (startupUpdateChecked || checkingUpdate || UpdateInfoBar.IsOpen ||
+            AboutVersionText.Foreground is not SolidColorBrush versionBrush ||
+            CheckUpdateLabel.Foreground is not SolidColorBrush updateBrush || !versionBrush.Color.Equals(updateBrush.Color))
+            throw new InvalidOperationException("Isolated startup must not start update requests; version and update link must use the same gray.");
+        object tooltip = ToolTipService.GetToolTip(CheckUpdateLink);
+        string updateHelp = AutomationProperties.GetHelpText(CheckUpdateLink);
+        try
+        {
+            PresentUpdateResult(new(UpdateState.Failed, "Offline fixture"), automatic: true);
+            PresentUpdateResult(new(UpdateState.Current, "Current fixture"), automatic: true);
+            if (UpdateInfoBar.IsOpen) throw new InvalidOperationException("Automatic current/error results must remain unobtrusive.");
+            var release = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/v1.8.2");
+            PresentUpdateResult(new(UpdateState.Available, "Available fixture", "1.8.2", release), automatic: true);
+            if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.8.2" ||
+                UpdateReleaseLink.NavigateUri != release || UpdateReleaseLink.Visibility != Visibility.Visible)
+                throw new InvalidOperationException("Available updates must offer the correct release page.");
+            PresentUpdateResult(new(UpdateState.Current, "Current fixture"), automatic: false);
+            if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Severity != InfoBarSeverity.Success ||
+                UpdateReleaseLink.NavigateUri is not null || UpdateReleaseLink.Visibility != Visibility.Collapsed)
+                throw new InvalidOperationException("Manual current result must not retain a stale update link.");
+            PresentUpdateResult(new(UpdateState.Failed, "Offline fixture"), automatic: false);
+            if (UpdateInfoBar.Severity != InfoBarSeverity.Warning || !CheckUpdateLink.IsEnabled)
+                throw new InvalidOperationException("Failed checks must report an error and allow retry.");
+        }
+        finally
+        {
+            UpdateInfoBar.IsOpen = false;
+            UpdateInfoBar.Visibility = Visibility.Collapsed;
+            ToolTipService.SetToolTip(CheckUpdateLink, tooltip);
+            AutomationProperties.SetHelpText(CheckUpdateLink, updateHelp);
+        }
         bool originalWide = Root.ActualWidth >= 920;
         try
         {
@@ -525,6 +570,55 @@ public sealed partial class MainWindow : Window
     private void SetCommandsEnabled(bool enabled)
     {
         CaptureButton.IsEnabled = ApplyButton.IsEnabled = StopButton.IsEnabled = enabled;
+    }
+    private async void CheckUpdate_Click(object sender, RoutedEventArgs e)
+        => await CheckForUpdatesAsync(automatic: false);
+
+    private async Task CheckForUpdatesAsync(bool automatic)
+    {
+        if (windowClosed || checkingUpdate) return;
+        checkingUpdate = true;
+        CheckUpdateLink.IsEnabled = false;
+        CheckUpdateLabel.Text = "检查中…";
+        try
+        {
+            var result = await UpdateChecker.CheckAsync(DisplayVersion, updateCancellation.Token);
+            if (windowClosed) return;
+            PresentUpdateResult(result, automatic);
+        }
+        catch (OperationCanceledException) when (windowClosed) { }
+        finally
+        {
+            checkingUpdate = false;
+            if (!windowClosed)
+            {
+                CheckUpdateLabel.Text = "检查更新";
+                CheckUpdateLink.IsEnabled = true;
+            }
+        }
+    }
+    private void PresentUpdateResult(UpdateResult result, bool automatic)
+    {
+        ToolTipService.SetToolTip(CheckUpdateLink, result.Message);
+        AutomationProperties.SetHelpText(CheckUpdateLink, result.Message);
+        if (automatic && result.State != UpdateState.Available) return;
+        UpdateInfoBar.Title = result.State switch
+        {
+            UpdateState.Available => "发现新版本 " + result.Version,
+            UpdateState.Current => "无需更新",
+            _ => "检查更新失败"
+        };
+        UpdateInfoBar.Message = result.Message;
+        UpdateInfoBar.Severity = result.State switch
+        {
+            UpdateState.Current => InfoBarSeverity.Success,
+            UpdateState.Failed => InfoBarSeverity.Warning,
+            _ => InfoBarSeverity.Informational
+        };
+        UpdateReleaseLink.NavigateUri = result.ReleasePage;
+        UpdateReleaseLink.Visibility = result.ReleasePage is null ? Visibility.Collapsed : Visibility.Visible;
+        UpdateInfoBar.Visibility = Visibility.Visible;
+        UpdateInfoBar.IsOpen = true;
     }
     private async void Apply_Click(object sender, RoutedEventArgs e)
     {
