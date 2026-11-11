@@ -6,7 +6,7 @@
 <div>
   <img src="https://github.com/user-attachments/assets/fa8d5b00-ac71-4e28-a2b2-a290efa95ec7" width=600/>
 </div>
-沉浸 · 自然 · 聚焦
+专注 · 自然 · 聚焦
 
 **[下载最新版 ↗](https://github.com/Coldtea233/Penumbra/releases)  ·  [反馈问题](https://github.com/Coldtea233/Penumbra/issues)**
 
