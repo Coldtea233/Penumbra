@@ -12,10 +12,20 @@ internal static class StartupCheck
     internal static bool Enabled => check;
     internal static bool Isolated { get; private set; }
     internal static bool UpdateCheckRequested { get; private set; }
+    internal static bool LayoutTestRequested { get; private set; }
+    internal static string? InstanceTestScope { get; private set; }
     internal static void Configure(string[] args)
     {
         UpdateCheckRequested = args.Contains("--update-test", StringComparer.Ordinal);
-        Isolated = UpdateCheckRequested || args.Contains("--ui-test", StringComparer.Ordinal);
+        LayoutTestRequested = args.Contains("--layout-test", StringComparer.Ordinal);
+        string? instanceTest = args.FirstOrDefault(a => a.StartsWith("--instance-test=", StringComparison.Ordinal));
+        if (instanceTest is not null)
+        {
+            if (!Guid.TryParse(instanceTest["--instance-test=".Length..], out var scope))
+                throw new ArgumentException("Invalid isolated instance-test scope.");
+            InstanceTestScope = scope.ToString("N");
+        }
+        Isolated = InstanceTestScope is not null || UpdateCheckRequested || LayoutTestRequested || args.Contains("--ui-test", StringComparer.Ordinal);
         const string prefix = "--startup-check=";
         string? option = args.FirstOrDefault(a => a.StartsWith(prefix, StringComparison.Ordinal));
         check = option is not null;
@@ -31,6 +41,23 @@ internal static class StartupCheck
         }
         report = Path.GetFullPath(option[prefix.Length..]);
         File.WriteAllText(report, "STARTING");
+    }
+    internal static DesktopSnapshot LayoutSnapshot()
+    {
+        // A deterministic image for isolated sizing/screenshot tests. Never
+        // capture a user's desktop or apply test controls to their renderer.
+        const int width = 640, height = 360;
+        var pixels = new byte[width * height * 4];
+        for (int y = 0; y < height; y++) for (int x = 0; x < width; x++)
+        {
+            int i = (y * width + x) * 4;
+            bool grid = x % 80 < 2 || y % 60 < 2;
+            pixels[i] = (byte)(grid ? 200 : 50 + x * 90 / width);
+            pixels[i + 1] = (byte)(grid ? 200 : 60 + y * 80 / height);
+            pixels[i + 2] = (byte)(grid ? 200 : 90 + x * 70 / width);
+            pixels[i + 3] = 255;
+        }
+        return new DesktopSnapshot(pixels, width, height, new byte[width * height]);
     }
     internal static void Stage(string stage)
     {
@@ -53,7 +80,7 @@ internal static class StartupCheck
             try
             {
                 window.VerifyStartup();
-                File.WriteAllText(report!, "PASS\nPublished WinUI window loaded and visible; v1.8.2; gray update link without underline and result states verified without network; startup label verified; blur/saturation controls synchronized; commands enabled; settings not written.");
+                File.WriteAllText(report!, "PASS\nPublished WinUI window loaded and visible; v1.8.3; gray update link without underline and result states verified without network; startup label verified; blur/saturation controls synchronized; commands enabled; settings not written.");
             }
             catch (Exception ex) { Failed(ex); }
             finally { window.Close(); }

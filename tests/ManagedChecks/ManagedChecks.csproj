@@ -11,5 +11,7 @@
     <Compile Include="../../src/Nocturne.UI/BlurParameters.cs" Link="BlurParameters.cs" />
     <Compile Include="../../src/Nocturne.UI/PreviewColor.cs" Link="PreviewColor.cs" />
     <Compile Include="../../src/Nocturne.UI/PreviewEffects.cs" Link="PreviewEffects.cs" />
+    <Compile Include="../../src/Nocturne.UI/SettingsLayoutMetrics.cs" Link="SettingsLayoutMetrics.cs" />
+    <Compile Include="../../src/Nocturne.UI/SettingsInstance.cs" Link="SettingsInstance.cs" />
   </ItemGroup>
 </Project>

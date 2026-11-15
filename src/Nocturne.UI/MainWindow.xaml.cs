@@ -45,6 +45,7 @@ public sealed partial class MainWindow : Window
     {
         StartupCheck.Stage("MainWindow InitializeComponent begin");
         InitializeComponent();
+        if (StartupCheck.LayoutTestRequested) Root.LayoutUpdated += (_, _) => ReportLayoutTestState();
         UpdateInfoBar.Closed += (_, _) => UpdateInfoBar.Visibility = Visibility.Collapsed;
         AutomationProperties.SetHelpText(CheckUpdateLink, "通过 GitHub Releases 检查新版本；启动时自动检查一次。");
         StartupCheck.Stage("MainWindow XAML connected");
@@ -148,6 +149,14 @@ public sealed partial class MainWindow : Window
         UpdateBlurControls();
         UpdateSaturationControls();
         StartupCheck.Stage("MainWindow constructor completed");
+    }
+    internal bool CloseForReplacement()
+    {
+        if (busy || closePending || windowClosed) return false;
+        closeApproved = true;
+        if (DispatcherQueue.TryEnqueue(() => Close())) return true;
+        closeApproved = false;
+        return false;
     }
     private void LoadControls(Settings s)
     {
@@ -361,9 +370,9 @@ public sealed partial class MainWindow : Window
     private void Root_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         if (e.NewSize.Width <= 0) return;
-        bool wide = e.NewSize.Width >= 920;
-        if (wideLayout == wide) return;
-        ApplyResponsiveLayout(wide);
+        bool wide = SettingsLayoutMetrics.UseTwoColumns(e.NewSize.Width, wideLayout);
+        if (wideLayout != wide) ApplyResponsiveLayout(wide);
+        ResizePreview();
     }
     private void ApplyResponsiveLayout(bool wide)
     {
@@ -376,9 +385,10 @@ public sealed partial class MainWindow : Window
         Grid.SetColumn(ExperimentalPanel, 0);
         Grid.SetRow(ExperimentalPanel, 2);
         ExperimentalPanel.Margin = new Thickness(0, wide ? 12 : 24, 0, 0);
-        PreviewColumn.MinWidth = wide ? 300 : 0;
-        ParameterColumn.Width = new GridLength(wide ? 340 : 0);
-        SettingsLayout.ColumnSpacing = wide ? 28 : 0;
+        PreviewColumn.Width = wide ? new GridLength(300) : new GridLength(1, GridUnitType.Star);
+        ParameterColumn.MinWidth = wide ? SettingsLayoutMetrics.MinimumParameterWidth : 0;
+        ParameterColumn.Width = wide ? new GridLength(1, GridUnitType.Star) : new GridLength(0);
+        SettingsLayout.ColumnSpacing = wide ? SettingsLayoutMetrics.ColumnSpacing : 0;
         Grid.SetColumn(ParameterPanel, wide ? 1 : 0);
         Grid.SetRow(ParameterPanel, wide ? 0 : 1);
         Grid.SetRowSpan(PreviewPanel, wide ? 2 : 1);
@@ -395,9 +405,70 @@ public sealed partial class MainWindow : Window
     }
     private void ResizePreview()
     {
-        if (PreviewHost.ActualWidth <= 0 || previewAspect <= 0) return;
-        double height = PreviewHost.ActualWidth / previewAspect;
-        if (Math.Abs(PreviewHost.Height - height) > 0.5) PreviewHost.Height = height;
+        if (PreviewSlot is null || PreviewHost is null) return;
+        double contentWidth = SettingsScrollViewer.ActualWidth - SettingsLayout.Margin.Left - SettingsLayout.Margin.Right;
+        if (contentWidth <= 2) return;
+        bool wide = wideLayout == true;
+        var size = wide
+            ? SettingsLayoutMetrics.TwoColumnPreviewSize(contentWidth,
+                SettingsScrollViewer.ActualHeight, previewAspect)
+            : SettingsLayoutMetrics.PreviewSize(contentWidth - 2,
+                SettingsScrollViewer.ActualHeight, previewAspect, false);
+        if (size.Width <= 0 || size.Height <= 0) return;
+        double cardWidth = size.Width + 2;
+        // The left column hugs the capped image. The right star column takes
+        // all remaining space, without a centered page or an empty left slot.
+        if (wide && (!PreviewColumn.Width.IsAbsolute || Math.Abs(PreviewColumn.Width.Value - cardWidth) > .5))
+            PreviewColumn.Width = new GridLength(cardWidth);
+        // Keep the card and image the same aspect: wide mode is height-capped,
+        // while stacked mode fills the content width without side gaps.
+        if (double.IsNaN(PreviewCard.Width) || Math.Abs(PreviewCard.Width - size.Width - 2) > .5)
+            PreviewCard.Width = size.Width + 2;
+        if (Math.Abs(PreviewHost.Height - size.Height) > .5) PreviewHost.Height = size.Height;
+        bool compact = PreviewSlot.ActualWidth < SettingsLayoutMetrics.CompactActionsWidth;
+        int statusRow = compact ? 1 : 0;
+        if (Grid.GetRow(WallpaperEngineIndicator) != statusRow)
+        {
+            Grid.SetRow(WallpaperEngineIndicator, statusRow);
+            Grid.SetColumn(WallpaperEngineIndicator, compact ? 0 : 1);
+            Grid.SetColumnSpan(WallpaperEngineIndicator, compact ? 2 : 1);
+            PreviewStatusRow.Height = compact ? GridLength.Auto : new GridLength(0);
+            PreviewActions.RowSpacing = compact ? 10 : 0;
+            WallpaperEngineIndicator.HorizontalAlignment = compact ? HorizontalAlignment.Stretch : HorizontalAlignment.Right;
+            WallpaperEngineIndicator.Margin = new Thickness(0, 0, compact ? 0 : 24, 0);
+        }
+    }
+    private void ReportLayoutTestState()
+    {
+        if (!Root.IsLoaded || PreviewHost.ActualWidth <= 0) return;
+        using var stream = new MemoryStream();
+        using (var writer = new System.Text.Json.Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("Width", Root.ActualWidth);
+            writer.WriteNumber("Height", Root.ActualHeight);
+            writer.WriteBoolean("Wide", wideLayout == true);
+            writer.WriteNumber("ContentWidth", SettingsLayout.ActualWidth);
+            writer.WriteNumber("ViewportWidth", SettingsScrollViewer.ActualWidth);
+            writer.WriteNumber("PreviewColumnWidth", PreviewColumn.ActualWidth);
+            writer.WriteNumber("ParameterColumnWidth", ParameterColumn.ActualWidth);
+            writer.WriteNumber("ColumnSpacing", SettingsLayout.ColumnSpacing);
+            writer.WriteNumber("PreviewSlotWidth", PreviewSlot.ActualWidth);
+            writer.WriteNumber("PreviewCardWidth", PreviewCard.ActualWidth);
+            writer.WriteNumber("ViewportHeight", SettingsScrollViewer.ActualHeight);
+            writer.WriteNumber("PreviewWidth", PreviewHost.ActualWidth);
+            writer.WriteNumber("PreviewHeight", PreviewHost.ActualHeight);
+            writer.WriteNumber("Aspect", previewAspect);
+            writer.WriteBoolean("CompactActions", Grid.GetRow(WallpaperEngineIndicator) == 1);
+            writer.WriteNumber("ParameterRow", Grid.GetRow(ParameterPanel));
+            writer.WriteNumber("ExperimentalRow", Grid.GetRow(ExperimentalPanel));
+            writer.WriteNumber("AboutRow", Grid.GetRow(AboutSection));
+            writer.WriteBoolean("ExperimentalInPreview", ExperimentalPanel.Parent == PreviewPanel);
+            writer.WriteEndObject();
+        }
+        string diagnostic = System.Text.Encoding.UTF8.GetString(stream.ToArray());
+        if (AutomationProperties.GetHelpText(SettingsScrollViewer) != diagnostic)
+            AutomationProperties.SetHelpText(SettingsScrollViewer, diagnostic);
     }
     private void DrawPreview(Settings s)
     {
@@ -445,6 +516,14 @@ public sealed partial class MainWindow : Window
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         StartupCheck.Stage("MainWindow Loaded");
+        if (StartupCheck.LayoutTestRequested)
+        {
+            snapshot = StartupCheck.LayoutSnapshot();
+            previewAspect = (double)snapshot.Width / snapshot.Height;
+            PreviewEmpty.Visibility = Visibility.Collapsed;
+            ResizePreview();
+            DrawPreview(ReadControls());
+        }
         if ((!StartupCheck.Isolated || StartupCheck.UpdateCheckRequested) && !startupUpdateChecked)
         {
             startupUpdateChecked = true;
@@ -464,7 +543,7 @@ public sealed partial class MainWindow : Window
     {
         if (!ready || !Root.IsLoaded || !AppWindow.IsVisible || Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
             throw new InvalidOperationException("Settings window was not loaded and visible.");
-        if (DisplayVersion != "v1.8.2" || AboutVersionText.Text != DisplayVersion ||
+        if (DisplayVersion != "v1.8.3" || AboutVersionText.Text != DisplayVersion ||
             CheckUpdateLabel.Text != "检查更新" || !CheckUpdateLink.IsEnabled ||
             CheckUpdateLabel.TextDecorations != Windows.UI.Text.TextDecorations.None ||
             StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
@@ -500,13 +579,13 @@ public sealed partial class MainWindow : Window
             PresentUpdateResult(new(UpdateState.Failed, "Offline fixture"), automatic: true);
             PresentUpdateResult(new(UpdateState.Current, "Current fixture"), automatic: true);
             if (UpdateInfoBar.IsOpen) throw new InvalidOperationException("Automatic current/error results must remain unobtrusive.");
-            var release = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/v1.8.3");
-            PresentUpdateResult(new(UpdateState.Available, "Available fixture", "1.8.3", release), automatic: true);
-            if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.8.3" ||
+            var release = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/v1.8.4");
+            PresentUpdateResult(new(UpdateState.Available, "Available fixture", "1.8.4", release), automatic: true);
+            if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.8.4" ||
                 UpdateReleaseLink.NavigateUri != release || UpdateReleaseLink.Visibility != Visibility.Visible)
                 throw new InvalidOperationException("Available updates must offer the correct release page.");
             VerifyUpdateNoticeAppearance();
-            PresentUpdateResult(new(UpdateState.Current, "当前版本已为最新发行版", "1.8.2"), automatic: false);
+            PresentUpdateResult(new(UpdateState.Current, "当前版本已为最新发行版", "1.8.3"), automatic: false);
             if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Severity != InfoBarSeverity.Success ||
                 UpdateInfoBar.Title != "当前版本已为最新发行版" || UpdateInfoBar.Message.Length != 0 ||
                 UpdateReleaseLink.NavigateUri is not null || UpdateReleaseLink.Visibility != Visibility.Collapsed)
@@ -524,7 +603,7 @@ public sealed partial class MainWindow : Window
             ToolTipService.SetToolTip(CheckUpdateLink, tooltip);
             AutomationProperties.SetHelpText(CheckUpdateLink, updateHelp);
         }
-        bool originalWide = Root.ActualWidth >= 920;
+        bool originalWide = wideLayout ?? SettingsLayoutMetrics.UseTwoColumns(Root.ActualWidth, null);
         try
         {
             foreach (bool wide in new[] { false, true, false, true })

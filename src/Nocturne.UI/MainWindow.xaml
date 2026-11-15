@@ -12,25 +12,29 @@
         <TextBlock Text="Penumbra" FontSize="15" FontWeight="SemiBold"/>
       </StackPanel>
     </Grid>
-    <ScrollViewer x:Name="SettingsScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto">
-      <Grid x:Name="SettingsLayout" Margin="32,16,32,24" ColumnSpacing="28">
+    <ScrollViewer x:Name="SettingsScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" SizeChanged="Preview_SizeChanged">
+      <Grid x:Name="SettingsLayout" Margin="32,16,32,24" HorizontalAlignment="Stretch" ColumnSpacing="24" SizeChanged="Preview_SizeChanged">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-        <Grid.ColumnDefinitions><ColumnDefinition x:Name="PreviewColumn" Width="*" MinWidth="300"/><ColumnDefinition x:Name="ParameterColumn" Width="340"/></Grid.ColumnDefinitions>
+        <Grid.ColumnDefinitions><ColumnDefinition x:Name="PreviewColumn" Width="300"/><ColumnDefinition x:Name="ParameterColumn" Width="*" MinWidth="340"/></Grid.ColumnDefinitions>
         <StackPanel x:Name="PreviewPanel" Grid.RowSpan="2" Spacing="16">
           <TextBlock x:Name="PreviewTitle" Text="桌面预览" FontSize="20" FontWeight="SemiBold"/>
-          <Border x:Name="PreviewCard" CornerRadius="{StaticResource CardCornerRadius}" BorderBrush="#30FFFFFF" BorderThickness="1" Background="#FF111111">
-            <Grid Height="330" x:Name="PreviewHost" SizeChanged="Preview_SizeChanged">
-              <Canvas x:Name="PreviewCanvas" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
-              <TextBlock x:Name="PreviewEmpty" Text="正在刷新壁纸…" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="13" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
-            </Grid>
-          </Border>
-          <Grid ColumnSpacing="12">
+          <Grid x:Name="PreviewSlot" SizeChanged="Preview_SizeChanged">
+            <Border x:Name="PreviewCard" HorizontalAlignment="Left" CornerRadius="{StaticResource CardCornerRadius}" BorderBrush="#30FFFFFF" BorderThickness="1" Background="#FF111111">
+              <Grid Height="240" x:Name="PreviewHost">
+                <Canvas x:Name="PreviewCanvas" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+                <TextBlock x:Name="PreviewEmpty" Text="正在刷新壁纸…" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="13" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
+              </Grid>
+            </Border>
+          </Grid>
+          <Grid x:Name="PreviewActions" ColumnSpacing="12">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition x:Name="PreviewStatusRow" Height="0"/></Grid.RowDefinitions>
             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
             <Button x:Name="CaptureButton" Content="刷新壁纸" Click="CapturePreview_Click"/>
-            <StackPanel x:Name="WallpaperEngineIndicator" Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="0,0,24,0" HorizontalAlignment="Right" VerticalAlignment="Center" AutomationProperties.Name="Wallpaper Engine 活动状态：正在检测" ToolTipService.ToolTip="正在检测当前会话的 Wallpaper Engine 进程">
+            <Grid x:Name="WallpaperEngineIndicator" Grid.Column="1" ColumnSpacing="8" Margin="0,0,24,0" HorizontalAlignment="Right" VerticalAlignment="Center" AutomationProperties.Name="Wallpaper Engine 活动状态：正在检测" ToolTipService.ToolTip="正在检测当前会话的 Wallpaper Engine 进程">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="7"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
               <Ellipse x:Name="WallpaperEngineDot" Width="7" Height="7" Fill="#FF8B9098" VerticalAlignment="Center"/>
-              <TextBlock x:Name="WallpaperEngineLabel" Text="Wallpaper Engine 活动状态" FontSize="14" Foreground="{ThemeResource TextFillColorPrimaryBrush}" VerticalAlignment="Center"/>
-            </StackPanel>
+              <TextBlock x:Name="WallpaperEngineLabel" Grid.Column="1" Text="Wallpaper Engine 活动状态" FontSize="14" Foreground="{ThemeResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+            </Grid>
           </Grid>
           <ToggleSwitch x:Name="StartupToggle" Header="登录时自启动" OnContent="已开启" OffContent="已关闭"/>
           <StackPanel x:Name="ExperimentalPanel" Spacing="16" Margin="0,12,0,0">
@@ -41,7 +45,7 @@
               </ToggleSwitch>
               <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="112"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <TextBlock Text="模糊半径" VerticalAlignment="Center"/>
+                <TextBlock Text="模糊半径" VerticalAlignment="Center" TextWrapping="Wrap"/>
                 <NumberBox x:Name="BlurRadiusBox" Grid.Column="1" AutomationProperties.Name="模糊半径（像素）" Minimum="0" Maximum="48" Value="12" SmallChange="1" LargeChange="8" SpinButtonPlacementMode="Compact" ValueChanged="BlurRadiusBox_Changed"/>
                 <TextBlock Grid.Column="2" Text="px" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
               </Grid>
@@ -53,7 +57,7 @@
               </ToggleSwitch>
               <Grid ColumnSpacing="8">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="112"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <TextBlock Text="饱和度" VerticalAlignment="Center"/>
+                <TextBlock Text="饱和度" VerticalAlignment="Center" TextWrapping="Wrap"/>
                 <NumberBox x:Name="SaturationBox" Grid.Column="1" AutomationProperties.Name="饱和度（百分比）" Minimum="0" Maximum="100" Value="40" SmallChange="1" LargeChange="10" SpinButtonPlacementMode="Compact" ValueChanged="SaturationBox_Changed"/>
                 <TextBlock Grid.Column="2" Text="%" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
               </Grid>
@@ -177,7 +181,7 @@
         </StackPanel>
       </Grid>
     </ScrollViewer>
-    <Border Grid.Row="2" BorderThickness="0,1,0,0" BorderBrush="#30FFFFFF" Background="#B8181818" Padding="24,14">
+    <Border x:Name="BottomBar" Grid.Row="2" BorderThickness="0,1,0,0" BorderBrush="#30FFFFFF" Background="#B8181818" Padding="24,14">
       <Grid ColumnSpacing="14"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
         <TextBlock x:Name="StatusText" Text="Penumbra" VerticalAlignment="Center" TextWrapping="Wrap" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}"/>
         <Button x:Name="StopButton" Grid.Column="1" Content="恢复桌面" Click="Stop_Click"/>

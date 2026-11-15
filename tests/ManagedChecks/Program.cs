@@ -7,6 +7,76 @@ void Check(bool good, string name)
     if (!good) { failures++; Console.WriteLine("FAIL " + name); }
 }
 var defaults = new Settings();
+var currentInstanceVersion = new Version(1, 8, 2, 0);
+Check(!SettingsInstance.ShouldReplace(@"C:\A\Penumbra.exe", currentInstanceVersion,
+    @"c:\a\penumbra.exe", currentInstanceVersion), "same build path reactivates the existing instance");
+Check(SettingsInstance.ShouldReplace(@"C:\B\Penumbra.exe", currentInstanceVersion,
+    @"C:\A\Penumbra.exe", currentInstanceVersion), "same-version hotfix in another directory replaces old settings");
+Check(SettingsInstance.ShouldReplace(@"C:\A\Penumbra.exe", currentInstanceVersion,
+    @"C:\A\Penumbra.exe", new Version(1, 8, 1, 0)), "newer version can replace in-place old settings");
+Check(!SettingsInstance.ShouldReplace(@"C:\B\Penumbra.exe", currentInstanceVersion,
+    @"C:\A\Penumbra.exe", new Version(1, 8, 3, 0)), "older launch cannot replace newer settings");
+foreach (var instanceVersion in new[] { new Version(0, 0, 0, 0), new Version(1, 8, 2, 0), new Version(12, 34, 567, 89) })
+    Check(SettingsInstance.UnpackVersion(SettingsInstance.PackVersion(instanceVersion)) == instanceVersion,
+        "running version survives window-property encoding");
+Check(SettingsInstance.UnpackVersion(0) is null, "legacy version property falls back to executable metadata");
+Check(SettingsLayoutMetrics.UseTwoColumns(820, null) &&
+    SettingsLayoutMetrics.UseTwoColumns(790, null), "near-square window keeps both columns");
+Check(!SettingsLayoutMetrics.UseTwoColumns(750, true) &&
+    !SettingsLayoutMetrics.UseTwoColumns(600, null), "columns stack only when genuinely narrow");
+Check(SettingsLayoutMetrics.UseTwoColumns(770, true) &&
+    !SettingsLayoutMetrics.UseTwoColumns(790, false) &&
+    SettingsLayoutMetrics.UseTwoColumns(800, false), "resize breakpoint has a stable dead band");
+Check(SettingsLayoutMetrics.UseTwoColumns(double.NaN, true) &&
+    !SettingsLayoutMetrics.UseTwoColumns(0, null), "invalid sizing preserves an existing layout safely");
+foreach (bool wide in new[] { true, false })
+foreach (double width in new[] { 1, 300, 416, 640, 920, 1920, 3840 })
+foreach (double viewport in new[] { 160, 320, 600, 920, 2160 })
+foreach (double aspect in new[] { 16.0 / 9, 9.0 / 16, 1, 32.0 / 9 })
+{
+    var size = SettingsLayoutMetrics.PreviewSize(width, viewport, aspect, wide);
+    Check(size.Width <= width + 1e-9 && size.Width > 0, "preview always fits available width");
+    Check(wide
+        ? size.Height <= 380 && size.Height <= Math.Max(96, viewport * .42) + 1e-9
+        : size.Width == width && Math.Abs(size.Height - width / aspect) < 1e-9,
+        "only wide mode caps height; stacked mode fills content width");
+    Check(Math.Abs(size.Width / size.Height - aspect) < 1e-9, "sized preview preserves wallpaper aspect");
+}
+var hugePreview = SettingsLayoutMetrics.PreviewSize(3840, 2160, 16.0 / 9, true);
+Check(hugePreview.Height == 380 && hugePreview.Width < 676, "maximized preview cannot fill the whole window");
+var tallPreview = SettingsLayoutMetrics.PreviewSize(700, 1000, 16.0 / 9, false);
+Check(tallPreview.Width == 700 && tallPreview.Height == 393.75,
+    "stacked preview fills width beyond the former 260px height cap");
+Check(SettingsLayoutMetrics.PreviewSize(700, 160, 16.0 / 9, false) == tallPreview,
+    "stacked preview fills width independently of viewport height");
+Check(SettingsLayoutMetrics.PreviewSize(0, 500, 1, true) == (0.0, 0.0) &&
+    SettingsLayoutMetrics.PreviewSize(double.PositiveInfinity, 500, 1, true) == (0.0, 0.0),
+    "unmeasured preview cannot produce invalid layout dimensions");
+var fallbackPreview = SettingsLayoutMetrics.PreviewSize(600, double.NaN, double.NaN, true);
+Check(double.IsFinite(fallbackPreview.Width) && double.IsFinite(fallbackPreview.Height), "invalid ratio and viewport use finite fallback");
+foreach (double contentWidth in new[] { 696, 763, 923, 1240, 1376, 1920, 3840 })
+foreach (double viewport in new[] { 211, 304, 600, 709, 2160 })
+foreach (double aspect in new[] { 16.0 / 9, 9.0 / 16, 1, 32.0 / 9 })
+{
+    var fitted = SettingsLayoutMetrics.TwoColumnPreviewSize(contentWidth, viewport, aspect);
+    double parameterWidth = contentWidth - fitted.Width - 2 - SettingsLayoutMetrics.ColumnSpacing;
+    Check(parameterWidth >= SettingsLayoutMetrics.MinimumParameterWidth - 1e-9,
+        "fitted preview always reserves readable parameter width");
+    Check(Math.Abs(fitted.Width + 2 + SettingsLayoutMetrics.ColumnSpacing + parameterWidth - contentWidth) < 1e-9,
+        "elastic parameters fill every pixel left by the preview");
+    Check(fitted.Height <= 380 && fitted.Height <= Math.Max(96, viewport * .42) + 1e-9 &&
+        Math.Abs(fitted.Width / fitted.Height - aspect) < 1e-9,
+        "filling columns preserves capped preview and aspect");
+    var repeated = SettingsLayoutMetrics.TwoColumnPreviewSize(contentWidth, viewport, aspect);
+    Check(fitted == repeated, "column fitting is stable without previous column feedback");
+}
+var fittedNormal = SettingsLayoutMetrics.TwoColumnPreviewSize(923, 709, 16.0 / 9);
+var fittedMaximized = SettingsLayoutMetrics.TwoColumnPreviewSize(1376, 709, 16.0 / 9);
+Check(fittedNormal == fittedMaximized,
+    "additional window width goes to parameters once the preview reaches its height cap");
+Check(SettingsLayoutMetrics.TwoColumnPreviewSize(100, 600, 16.0 / 9) == (0.0, 0.0) &&
+    SettingsLayoutMetrics.TwoColumnPreviewSize(double.NaN, 600, 16.0 / 9) == (0.0, 0.0),
+    "incomplete column measurements are ignored safely");
 Check(!defaults.SaturationEnabled && defaults.Saturation == 40, "saturation remains opt-in for old settings");
 var colorSettings = defaults with { SaturationEnabled = true, Saturation = 25 };
 Check(colorSettings.SaturationEnabled && colorSettings.Saturation == 25 && !colorSettings.BlurEnabled, "saturation independent from blur");
