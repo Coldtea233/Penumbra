@@ -2,6 +2,7 @@
 // 合成一杯壁纸渐变 + 若干单元格，检查内容判定、回退、位打包与耗时。
 #include <windows.h>
 #include "../src/Nocturne.Renderer/icon_mask.h"
+#include "../src/Nocturne.Renderer/icon_glyph.h"
 #include <chrono>
 #include <cstdio>
 #include <vector>
@@ -77,14 +78,50 @@ int main() {
     icon_mask::Segment(bits,Width,Height,pixels.data(),bare);
     check(at(35,35),"a missing label rect keeps the icon protected");
 
-    // 单格判定过多说明壁纸估计失真：宁可让这个图标变暗，也不要整块提亮。
+    // 单格判定过多说明壁纸估计失真：不清空就整块提亮，所以交给字形回退处理。
     std::vector<uint32_t> blocky=pixels;
     FillWallpaper(blocky,Width,Height);
-    FillRect(blocky,Width,Height,{22,22,78,98},0x00FF00FF);
-    icon_mask::Segment(bits,Width,Height,blocky.data(),{cells.front()});
+    FillRect(blocky,Width,Height,{26,22,74,98},0x00FF00FF);   // 留出两侧边距，让模型仍以壁纸为背景
+    icon_mask::Cell withoutLabel{cells.front().bounds,{},-1,{}};
+    std::vector<size_t> unresolved;
+    icon_mask::Segment(bits,Width,Height,blocky.data(),{withoutLabel,cells.back()},&unresolved);
     int markedInCell=0;
-    for(int y=22;y<98;++y) for(int x=22;x<78;++x) markedInCell+=icon_mask::Get(bits,size_t(y)*Width+x);
-    check(markedInCell==0,"an over-budget cell is discarded");
+    for(int y=22;y<98;++y) for(int x=26;x<74;++x) markedInCell+=icon_mask::Get(bits,size_t(y)*Width+x);
+    check(markedInCell==0,"an over-budget cell is left to the glyph fallback");
+    check(unresolved.size()==1&&unresolved.front()==0,"only the failing cell is reported");
+
+    // 字形回退：图标方块几何、标签矩形重判、字形缩放。
+    const RECT box=icon_mask::IconBox(cells.front());
+    check(box.top==cells.front().bounds.top,"the icon box starts at the cell top");
+    check(box.bottom-box.top==cells.front().label.top-cells.front().bounds.top,"the icon box side follows the label");
+    check(std::abs((box.left+box.right)/2-(cells.front().bounds.left+cells.front().bounds.right)/2)<=1,"the icon box is centred");
+    std::vector<uint32_t> labelOnly=pixels;
+    FillWallpaper(labelOnly,Width,Height);
+    // 只填标签矩形中间的一段，两侧留出壁纸，模拟“文字贴着矩形、矩形比文字宽一点”。
+    const long labelSpan=cells.front().label.right-cells.front().label.left;
+    FillRect(labelOnly,Width,Height,{cells.front().label.left+labelSpan/3,cells.front().label.top,
+        cells.front().label.right-labelSpan/3,cells.front().label.bottom},Label);
+    icon_mask::SegmentLabelRect(bits,Width,Height,labelOnly.data(),cells.front().label);
+    check(at(int(cells.front().label.left)+10,int(cells.front().label.top)+2),"the label fallback keeps the text");
+    check(!at(int(cells.front().bounds.left)+2,int(cells.front().bounds.top)+2),"the label fallback stays inside its rect");
+
+    // 标签字形：用桌面图标字体直接画字，结果必须落在标签矩形内。
+    bits.assign((size_t(Width)*Height+7)/8,0);
+    const RECT labelRect{40,40,200,60};
+    icon_glyph::WriteLabel(bits,Width,Height,L"Penumbra",labelRect,96);
+    int inside=0,outside=0;
+    for(int y=0;y<Height;++y) for(int x=0;x<Width;++x) {
+        if(!icon_mask::Get(bits,size_t(y)*Width+x)) continue;
+        if(x>=labelRect.left&&x<labelRect.right&&y>=labelRect.top&&y<labelRect.bottom) inside++; else outside++;
+    }
+    check(inside>40,"the label glyph covers the text area");
+    check(outside==0,"the label glyph stays inside the label rect");
+
+    std::vector<unsigned char> glyph(2*2*4,0);
+    glyph[3]=255; glyph[7]=255;             // 左上、右上不透明，下面一行透明
+    icon_mask::ScaleGlyph(bits,Width,Height,glyph.data(),2,2,{100,100,104,104});
+    check(at(100,100)&&at(103,100),"the glyph is scaled to the target box");
+    check(!at(100,103)&&!at(103,103),"transparent glyph rows stay darkened");
 
     // 壁纸纹理造成的孤立点不应在暗角上留下亮点。
     std::vector<uint32_t> speck=pixels;

@@ -28,6 +28,7 @@
 #include "render_budget.h"
 #include "vignette_pixels.h"
 #include "icon_mask.h"
+#include "icon_glyph.h"
 
 // Event-driven at rest. A short-lived timer exists only during a transition.
 constexpr UINT TrayMessage = WM_APP + 1, ReorderMessage = WM_APP + 2, IconMessage = WM_APP + 3, WindowStateMessage = WM_APP + 4, TrayId = 1;
@@ -300,10 +301,29 @@ bool ReadIconCells(std::vector<icon_mask::Cell>& cells) {
     DWORD pid=0; GetWindowThreadProcessId(iconList,&pid);
     HANDLE process=OpenProcess(PROCESS_VM_OPERATION|PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
     if(!process) return false;
-    void* remote=VirtualAllocEx(process,nullptr,sizeof(RECT),MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+    // 共享缓冲同时放 RECT 请求和 LVITEM（含标签文字），一次分配复用。
+    void* remote=VirtualAllocEx(process,nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
     if(!remote) { CloseHandle(process); return false; }
     DWORD_PTR count=0;
     bool ok=SendMessageTimeoutW(iconList,LVM_GETITEMCOUNT,0,0,SMTO_ABORTIFHUNG,200,&count)!=0 && count<=4096;
+    // 图标索引与标签文字一次取回：字形回退需要它们，正常路径不用也不额外通信。
+    const auto QueryItem=[&](DWORD_PTR index,icon_mask::Cell& cell) {
+        constexpr int TextCapacity=128;
+        LVITEMW item{};
+        item.mask=LVIF_IMAGE|LVIF_TEXT;
+        item.iItem=static_cast<int>(index);
+        item.cchTextMax=TextCapacity;
+        item.pszText=reinterpret_cast<LPWSTR>(static_cast<char*>(remote)+sizeof(LVITEMW));
+        if(!WriteProcessMemory(process,remote,&item,sizeof(item),nullptr)) return false;
+        DWORD_PTR answered=0;
+        if(!SendMessageTimeoutW(iconList,LVM_GETITEMW,0,reinterpret_cast<LPARAM>(remote),SMTO_ABORTIFHUNG,200,&answered)||!answered) return false;
+        LVITEMW answer{};
+        if(!ReadProcessMemory(process,remote,&answer,sizeof(answer),nullptr)) return false;
+        cell.image=answer.iImage;
+        wchar_t text[TextCapacity]{};
+        if(ReadProcessMemory(process,item.pszText,text,sizeof(text)-sizeof(wchar_t),nullptr)) cell.text.assign(text);
+        return true;
+    };
     const auto Query=[&](DWORD_PTR index,int code,RECT& answer) {
         RECT request{code,0,0,0};
         if(!WriteProcessMemory(process,remote,&request,sizeof(request),nullptr)) return false;
@@ -320,6 +340,7 @@ bool ReadIconCells(std::vector<icon_mask::Cell>& cells) {
         icon_mask::Cell cell;
         if(Query(index,LVIR_BOUNDS,cell.bounds) && cell.bounds.right>cell.bounds.left && cell.bounds.bottom>cell.bounds.top) {
             if(!Query(index,LVIR_LABEL,cell.label)) cell.label={};
+            QueryItem(index,cell);
             cells.push_back(cell);
         }
         if(ClockMs()>deadline) { complete=false; break; }
@@ -381,7 +402,10 @@ bool ReadIconMask(IconMask& mask) {
     if(!capture.Create(mask.width,mask.height)) { iconMaskUnavailable=true; PublishIconMask(mask); return true; }
     ZeroMemory(capture.pixels,count*sizeof(uint32_t));
     if(!PrintWindow(iconList,capture.dc,3)) { iconMaskUnavailable=true; PublishIconMask(mask); return true; }
-    icon_mask::Segment(mask.bits,mask.width,mask.height,capture.pixels,cells);
+    std::vector<size_t> unresolved;
+    icon_mask::Segment(mask.bits,mask.width,mask.height,capture.pixels,cells,&unresolved);
+    icon_glyph::Resolve(mask.bits,mask.width,mask.height,capture.pixels,cells,unresolved,
+        static_cast<int>(GetDpiForWindow(iconList)));
     PublishIconMask(mask);
     return true;
 }
