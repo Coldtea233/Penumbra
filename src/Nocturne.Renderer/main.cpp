@@ -961,7 +961,11 @@ bool Rebuild() {
     Status(message.c_str()); return true;
 }
 void OpenSettings() {
-    wchar_t exe[32768]; GetModuleFileNameW(nullptr,exe,32768);
+    wchar_t exe[32768]{};
+    if(GetModuleFileNameW(nullptr,exe,32768)==0) {
+        MessageBoxW(nullptr,L"无法定位程序目录，请从开始菜单重新打开设置。",L"Penumbra",MB_OK|MB_ICONERROR);
+        return;
+    }
     std::wstring path=exe; path=path.substr(0,path.find_last_of(L"\\/")+1)+L"Penumbra.exe";
     if(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
         MessageBoxW(nullptr,L"无法打开设置。请保持 Penumbra.exe 与原生程序位于同一文件夹。",L"Penumbra",MB_OK|MB_ICONERROR);
