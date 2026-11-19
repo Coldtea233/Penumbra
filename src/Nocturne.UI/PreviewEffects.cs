@@ -14,18 +14,27 @@ internal static class PreviewEffects
         {
             1 => (14, 22, 40), 2 => (27, 18, 16), _ => (0, 0, 0)
         };
-        for (int y = 0; y < height; y++)
+        // 横向项与行无关：按列算一次，拖动滑杆时每像素只剩一次开方。
+        var columns = new double[width];
         for (int x = 0; x < width; x++)
         {
             double dx = ((x + .5) / width - settings.CenterX) * 2 / settings.Shape;
+            columns[x] = dx * dx;
+        }
+        for (int y = 0; y < height; y++)
+        {
             double dy = ((y + .5) / height - settings.CenterY) * 2;
-            double t = Math.Clamp((Math.Sqrt(dx * dx + dy * dy) - settings.Radius) / settings.Feather, 0, 1);
-            double a = icons[y * width + x] != 0 && !settings.DarkenIcons ? 0 : settings.Opacity * t * t * (3 - 2 * t);
-            int i = (y * width + x) * 4;
-            destination[i] = (byte)(source[i] * (1 - a) + blue * a);
-            destination[i + 1] = (byte)(source[i + 1] * (1 - a) + green * a);
-            destination[i + 2] = (byte)(source[i + 2] * (1 - a) + red * a);
-            destination[i + 3] = 255;
+            double vertical = dy * dy;
+            for (int x = 0; x < width; x++)
+            {
+                double t = Math.Clamp((Math.Sqrt(columns[x] + vertical) - settings.Radius) / settings.Feather, 0, 1);
+                double a = icons[y * width + x] != 0 && !settings.DarkenIcons ? 0 : settings.Opacity * t * t * (3 - 2 * t);
+                int i = (y * width + x) * 4;
+                destination[i] = (byte)(source[i] * (1 - a) + blue * a);
+                destination[i + 1] = (byte)(source[i + 1] * (1 - a) + green * a);
+                destination[i + 2] = (byte)(source[i + 2] * (1 - a) + red * a);
+                destination[i + 3] = 255;
+            }
         }
         return sigma > 0 ? PreviewBlur.Apply(destination, width, height, sigma) : destination;
     }
