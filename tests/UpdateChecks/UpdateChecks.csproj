@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../src/Nocturne.UI/UpdateChecker.cs" Link="UpdateChecker.cs" />
+    <Compile Include="../../src/Nocturne.UI/UpdateDownload.cs" Link="UpdateDownload.cs" />
   </ItemGroup>
 </Project>

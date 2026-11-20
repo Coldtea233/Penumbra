@@ -78,12 +78,29 @@ internal static class AppDistribution
             var updates = await context.GetAppAndOptionalStorePackageUpdatesAsync().AsTask(deadline.Token);
             token.ThrowIfCancellationRequested();
             if (updates.Count != 0)
-                return new(UpdateState.Available, "可前往 Microsoft Store 下载并安装更新。", ReleasePage: StorePage);
+                return new(UpdateState.Available, "可由 Microsoft Store 下载并安装更新。", ReleasePage: StorePage, StoreInstallAvailable: true);
             return new(UpdateState.Current, "当前版本已为最新发行版");
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         { return new(UpdateState.Failed, "连接 Microsoft Store 超时，请稍后重试。"); }
         catch (Exception ex) when (ex is COMException or InvalidOperationException or UnauthorizedAccessException)
         { return new(UpdateState.Failed, "暂时无法检查 Microsoft Store 更新，请确认商店可用后重试。"); }
+    }
+
+    internal static async Task<string> InstallStoreUpdateAsync(IntPtr owner, CancellationToken token)
+    {
+        if (!IsStore || Package.Current.SignatureKind != PackageSignatureKind.Store)
+            return "此版本无法使用 Microsoft Store 应用内更新。";
+        var context = StoreContext.GetDefault();
+        WinRT.Interop.InitializeWithWindow.Initialize(context, owner);
+        var updates = await context.GetAppAndOptionalStorePackageUpdatesAsync().AsTask(token);
+        if (updates.Count == 0) return "当前版本已为最新发行版";
+        var result = await context.RequestDownloadAndInstallStorePackageUpdatesAsync(updates).AsTask(token);
+        return result.OverallState switch
+        {
+            StorePackageUpdateState.Completed => "Microsoft Store 已完成更新。",
+            StorePackageUpdateState.Canceled => "已取消更新。",
+            _ => "Microsoft Store 暂时未完成更新，请重试或选择查看更新。"
+        };
     }
 }

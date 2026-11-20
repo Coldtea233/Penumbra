@@ -114,6 +114,9 @@
                     </ResourceDictionary.ThemeDictionaries>
                   </ResourceDictionary>
                 </InfoBar.Resources>
+                <InfoBar.Content>
+                  <Button x:Name="InstallUpdateButton" Content="下载并安装" Click="InstallUpdate_Click" Visibility="Collapsed"/>
+                </InfoBar.Content>
                 <InfoBar.ActionButton>
                   <HyperlinkButton x:Name="UpdateReleaseLink" Content="查看更新" Visibility="Collapsed" AutomationProperties.Name="在 GitHub 查看新版本"/>
                 </InfoBar.ActionButton>

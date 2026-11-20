@@ -33,6 +33,8 @@ public sealed partial class MainWindow : Window
     private bool animationTestOpen;
     private VignetteAnimationDurations animationDurations = VignetteAnimationDurations.Defaults;
     private bool startupUpdateChecked, checkingUpdate;
+    private bool installingUpdate;
+    private UpdateResult? availableUpdate;
     private readonly CancellationTokenSource updateCancellation = new();
     private WriteableBitmap? previewBitmap;
     private byte[]? previewPixels;
@@ -735,7 +737,7 @@ public sealed partial class MainWindow : Window
 
     private async Task CheckForUpdatesAsync(bool automatic)
     {
-        if (windowClosed || checkingUpdate) return;
+        if (windowClosed || checkingUpdate || installingUpdate) return;
         checkingUpdate = true;
         CheckUpdateLink.IsEnabled = false;
         CheckUpdateLabel.Text = "检查中…";
@@ -762,6 +764,8 @@ public sealed partial class MainWindow : Window
         ToolTipService.SetToolTip(CheckUpdateLink, result.Message);
         AutomationProperties.SetHelpText(CheckUpdateLink, result.Message);
         if (automatic && result.State != UpdateState.Available) return;
+        availableUpdate = result.State == UpdateState.Available ? result : null;
+        InstallUpdateButton.Visibility = result.Asset is not null || result.StoreInstallAvailable ? Visibility.Visible : Visibility.Collapsed;
         UpdateInfoBar.Title = result.State switch
         {
             UpdateState.Available => result.Version is null ? "发现新版本" : "发现新版本 " + result.Version,
@@ -779,6 +783,66 @@ public sealed partial class MainWindow : Window
         UpdateReleaseLink.Visibility = result.ReleasePage is null ? Visibility.Collapsed : Visibility.Visible;
         UpdateInfoBar.Visibility = Visibility.Visible;
         UpdateInfoBar.IsOpen = true;
+    }
+
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        if (installingUpdate || checkingUpdate || busy || closePending || availableUpdate is not { } update) return;
+        installingUpdate = true;
+        InstallUpdateButton.IsEnabled = CheckUpdateLink.IsEnabled = false;
+        string? installer = null;
+        bool launched = false;
+        try
+        {
+            var dialog = new ContentDialog
+            {
+                XamlRoot = Root.XamlRoot,
+                Title = "安装更新",
+                Content = "安装前请保存参数。安装时设置窗口和桌面效果可能会暂时关闭。",
+                PrimaryButtonText = "继续",
+                CloseButtonText = "取消",
+                DefaultButton = ContentDialogButton.Close
+            };
+            if (await dialog.ShowAsync() != ContentDialogResult.Primary || windowClosed) return;
+            var token = updateCancellation.Token;
+            if (update.StoreInstallAvailable)
+            {
+                UpdateInfoBar.Message = "正在请求 Microsoft Store 安装更新…";
+                UpdateInfoBar.Message = await AppDistribution.InstallStoreUpdateAsync(WinRT.Interop.WindowNative.GetWindowHandle(this), token);
+                return;
+            }
+            if (update.Asset is not { } asset) return;
+            UpdateInfoBar.Message = "正在下载安装包…";
+            installer = await UpdateDownload.DownloadAsync(asset, new Progress<int>(percent =>
+            {
+                if (!windowClosed && installingUpdate) UpdateInfoBar.Message = $"正在下载安装包… {percent}%";
+            }), token);
+            if (windowClosed) return;
+            if (busy) throw new InvalidOperationException("请等待参数应用结束后重试。");
+            try { using var stop = EventWaitHandle.OpenExisting(@"Local\Nocturne.Stop.v1"); stop.Set(); }
+            catch (WaitHandleCannotBeOpenedException) { }
+            for (int attempt = 0; attempt < 50 && FindWindow("Nocturne.Controller", null) != IntPtr.Zero; attempt++)
+                await Task.Delay(100, token);
+            if (FindWindow("Nocturne.Controller", null) != IntPtr.Zero)
+                throw new InvalidOperationException("桌面效果仍在运行，请从托盘退出后重试。");
+            token.ThrowIfCancellationRequested();
+            using var process = Process.Start(new ProcessStartInfo(installer) { UseShellExecute = true });
+            if (process is null) throw new InvalidOperationException("无法打开安装程序。");
+            launched = true;
+            closeApproved = true;
+            Close();
+        }
+        catch (OperationCanceledException) when (windowClosed) { }
+        catch (Exception ex)
+        {
+            if (!windowClosed) UpdateInfoBar.Message = "更新未完成。" + (ex is OperationCanceledException ? "下载超时，请重试。" : ex.Message);
+        }
+        finally
+        {
+            if (!launched && installer is not null) UpdateDownload.Cleanup(installer);
+            installingUpdate = false;
+            if (!windowClosed) InstallUpdateButton.IsEnabled = CheckUpdateLink.IsEnabled = true;
+        }
     }
     private async void Apply_Click(object sender, RoutedEventArgs e)
     {

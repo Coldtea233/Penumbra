@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using Nocturne;
 
@@ -112,6 +113,39 @@ using (var client = new HttpClient(handler))
     Check((await UpdateChecker.CheckAsync(client, "bad", CancellationToken.None)).State == UpdateState.Failed && handler.Requests == 0,
         "invalid local version fails before HTTP");
 }
+byte[] fixtureInstaller = [13, 22, 35];
+string installerDigest = Convert.ToHexString(SHA256.HashData(fixtureInstaller));
+var withInstaller = Release("v1.9.2")[..^1] +
+    ",\"assets\":[{\"name\":\"Penumbra-v1.9.2-Setup-x64.exe\",\"state\":\"uploaded\",\"size\":3,\"digest\":\"sha256:" + installerDigest +
+    "\",\"browser_download_url\":\"https://evil.invalid/update.exe\"}]}";
+var installerFixture = await Fixture(withInstaller);
+Check(installerFixture.Asset?.Url.AbsoluteUri == "https://github.com/Coldtea233/Penumbra/releases/download/v1.9.2/Penumbra-v1.9.2-Setup-x64.exe", "trusted asset download URL is derived from the tag");
+Check((await Fixture(withInstaller.Replace("sha256:", "sha1:"))).Asset is null, "missing SHA-256 leaves manual release link only");
+Check((await Fixture(withInstaller, current: "1.9.2")).Asset is null, "same version never offered in-app");
+foreach (string scenario in new[] { "verified", "wrong hash", "untrusted redirect" })
+{
+    var installer = installerFixture.Asset!;
+    using var handler = new FixtureHandler((request, _) =>
+    {
+        if (request.RequestUri?.Host == "github.com")
+        {
+            var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+            redirect.Headers.Location = new Uri(scenario == "untrusted redirect" ? "https://evil.invalid/asset" : "https://release-assets.githubusercontent.com/asset");
+            return Task.FromResult(redirect);
+        }
+        byte[] bytes = scenario == "wrong hash" ? [1, 2, 3] : fixtureInstaller;
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(bytes) });
+    });
+    using var client = new HttpClient(handler);
+    try
+    {
+        string path = await UpdateDownload.DownloadAsync(client, installer, new Progress<int>(), CancellationToken.None);
+        try { Check(scenario == "verified" && File.ReadAllBytes(path).SequenceEqual(fixtureInstaller), "download returns a file only after verification"); }
+        finally { UpdateDownload.Cleanup(path); }
+    }
+    catch (InvalidDataException) { Check(scenario != "verified" && handler.Requests == (scenario == "untrusted redirect" ? 1 : 2), "blocks " + scenario); }
+}
+
 if (args.Contains("--live"))
 {
     var clock = Stopwatch.StartNew();

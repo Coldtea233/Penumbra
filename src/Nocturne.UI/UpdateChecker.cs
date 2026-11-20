@@ -5,10 +5,12 @@ using System.Text.Json;
 namespace Nocturne;
 
 internal enum UpdateState { Available, Current, Failed }
-internal sealed record UpdateResult(UpdateState State, string Message, string? Version = null, Uri? ReleasePage = null);
+internal sealed record UpdateResult(UpdateState State, string Message, string? Version = null, Uri? ReleasePage = null,
+    UpdateAsset? Asset = null, bool StoreInstallAvailable = false);
+internal sealed record UpdateAsset(Uri Url, string Name, long Size, string Sha256);
 
 // Runs only in the settings process, once at startup or on an explicit click.
-// No token, background timer, automatic download, or native-renderer dependency.
+// No token or background timer. Installation requires explicit user action.
 internal static class UpdateChecker
 {
     internal const string Endpoint = "https://api.github.com/repos/Coldtea233/Penumbra/releases/latest";
@@ -101,7 +103,10 @@ internal static class UpdateChecker
             string tag = tagProperty.GetString()!;
             if (tag.Length > 64 || tag != tag.Trim() || !TryVersion(tag, out var latest))
                 return new(UpdateState.Failed, "无法识别 GitHub 发行版的版本号。");
-            return Compare(current, latest, tag);
+            var result = Compare(current, latest, tag);
+            if (result.State == UpdateState.Available && ReadInstaller(release, tag, latest) is { } installer)
+                return result with { Asset = installer, Message = "可在应用内下载并安装。安装前请保存参数。" };
+            return result;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         { return new(UpdateState.Failed, "连接 GitHub 超时，请检查网络后重试。"); }
@@ -124,6 +129,26 @@ internal static class UpdateChecker
         if (latest > current)
             return new(UpdateState.Available, "可前往 GitHub 查看更新并下载安装包。更新前请从托盘退出旧版。", latest.ToString(), page);
         return new(UpdateState.Current, latest == current ? "当前版本已为最新发行版" : "当前版本高于 GitHub 最新正式发行版。", latest.ToString());
+    }
+
+    private static UpdateAsset? ReadInstaller(JsonElement release, string tag, Version version)
+    {
+        if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array) return null;
+        string name = $"Penumbra-v{version}-Setup-x64.exe";
+        var url = new Uri($"https://github.com/Coldtea233/Penumbra/releases/download/{Uri.EscapeDataString(tag)}/{name}");
+        foreach (var asset in assets.EnumerateArray())
+        {
+            if (asset.ValueKind != JsonValueKind.Object || !asset.TryGetProperty("name", out var filename) ||
+                filename.ValueKind != JsonValueKind.String || filename.GetString() != name ||
+                !asset.TryGetProperty("state", out var state) || state.ValueKind != JsonValueKind.String || state.GetString() != "uploaded" ||
+                !asset.TryGetProperty("size", out var size) || size.ValueKind != JsonValueKind.Number ||
+                !size.TryGetInt64(out long length) || length < 1 || length > 256 * 1024 * 1024 ||
+                !asset.TryGetProperty("digest", out var digest) || digest.ValueKind != JsonValueKind.String) continue;
+            string hash = digest.GetString()!;
+            if (hash.Length == 71 && hash.StartsWith("sha256:", StringComparison.Ordinal) && hash[7..].All(Uri.IsHexDigit))
+                return new(url, name, length, hash[7..]);
+        }
+        return null;
     }
 
     // Public GitHub latest-release redirect is a low-cost fallback when a
