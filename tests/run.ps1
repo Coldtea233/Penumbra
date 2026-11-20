@@ -4,7 +4,7 @@ if(!$Toolchain){throw 'Pass -Toolchain with the llvm-mingw directory.'}
 $Toolchain=(Resolve-Path -LiteralPath $Toolchain).Path
 $testDirectory=Join-Path $PSScriptRoot 'bin'
 New-Item -ItemType Directory -Force $testDirectory|Out-Null
-$testNames=@('DesktopLayeringTests','RendererTests','VignettePixelsTests')
+$testNames=@('DesktopLayeringTests','RendererTests','VignettePixelsTests','IconMaskTests')
 if($InstallerOnly){$testNames=@('InstallerTests')}
 if($WindowEvents){$testNames+=@('WindowPresenceTests','WindowQueryTests')}
 if($VisualProbe){$testNames+='LayeredOpacityTests'}

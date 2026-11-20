@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <commctrl.h>
 #include <psapi.h>
 #include <dwmapi.h>
 #include <algorithm>
@@ -15,6 +16,8 @@
 #include <string>
 #include <vector>
 #include <cstdio>
+#include <cstddef>
+#include <cstring>
 #include <cstdint>
 #include <memory>
 #include "focus_animation.h"
@@ -24,6 +27,8 @@
 #include "wallpaper_layer.h"
 #include "render_budget.h"
 #include "vignette_pixels.h"
+#include "icon_mask.h"
+#include "icon_glyph.h"
 
 // Event-driven at rest. A short-lived timer exists only during a transition.
 constexpr UINT TrayMessage = WM_APP + 1, ReorderMessage = WM_APP + 2, IconMessage = WM_APP + 3, WindowStateMessage = WM_APP + 4, TrayId = 1;
@@ -78,6 +83,8 @@ Params params;
 bool paused=false, capturingPreview=false;
 bool blurPolicyAllowed=true;
 bool iconsDirty=false, animationTimerArmed=false;
+// 取不到图标布局时遮罩为空，暗角照常绘制；状态栏据此说明图标会一并变暗。
+bool iconMaskUnavailable=false;
 bool windowStatePending=false, reorderPending=false, iconPending=false;
 double frameIntervalMs=1000.0/60, detectedRefreshHz=0, nextFrameAt=0;
 focus_animation::Transition transition;
@@ -126,6 +133,23 @@ struct IconMask {
     }
 };
 IconMask iconMask;
+// 设置窗口的预览需要同一份图标遮罩。遮罩放在命名共享内存里，
+// 只暴露每像素 1 位的掩码和它的屏幕矩形，不含任何屏幕图像；
+// 预览端只做采样，判定逻辑只有 icon_mask.h 这一份实现。
+struct IconMaskShare {
+    uint32_t magic, version, width, height, bytes;
+    int32_t left, top;
+    uint64_t generation;
+};
+constexpr uint32_t IconMaskMagic=0x314D494Eu; // "NIM1"
+// 布局同时被设置窗口按裸偏移读取，改动必须与 DesktopSnapshot.cs 同步。
+static_assert(sizeof(IconMaskShare)==40,"icon mask header layout");
+static_assert(offsetof(IconMaskShare,bytes)==16,"icon mask byte count offset");
+static_assert(offsetof(IconMaskShare,left)==20,"icon mask origin offset");
+static_assert(offsetof(IconMaskShare,generation)==32,"icon mask generation offset");
+HANDLE iconMaskMapping{};
+void* iconMaskView{};
+size_t iconMaskCapacity=0;
 std::wstring configDir, configFile;
 
 void TraceFrame(double value) {
@@ -276,37 +300,122 @@ bool LocateDesktop() {
     iconList=FindWindowExW(icons,nullptr,L"SysListView32",nullptr);
     return wcscmp(name,L"Progman")==0 || wcscmp(name,L"WorkerW")==0;
 }
-bool ReadIconMask(IconMask& mask) {
-    if(!iconList || !IsWindowVisible(iconList)) return true;
-    if(!GetWindowRect(iconList,&mask.rect)) return false;
-    mask.width=mask.rect.right-mask.rect.left; mask.height=mask.rect.bottom-mask.rect.top;
-    size_t count=(size_t)mask.width*mask.height;
-    if(mask.width<1 || mask.height<1 || count>160000000) return false;
-    BITMAPINFO bi{}; bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth=mask.width; bi.bmiHeader.biHeight=-mask.height;
-    bi.bmiHeader.biPlanes=1; bi.bmiHeader.biBitCount=32;
-    HDC screen=GetDC(nullptr), memory=CreateCompatibleDC(screen);
-    void* bits{}; HBITMAP bitmap=CreateDIBSection(screen,&bi,DIB_RGB_COLORS,&bits,nullptr,0);
-    if(!memory||!bitmap||!bits) {
-        if(bitmap) DeleteObject(bitmap); if(memory) DeleteDC(memory); ReleaseDC(nullptr,screen); return false;
-    }
-    HGDIOBJ previous=SelectObject(memory,bitmap);
-    ZeroMemory(bits,count*4);
-    // Explorer paints only the icon glyphs/labels into this black DIB. Excluding
-    // those exact pixels preserves icons without bright rectangular cutouts.
-    bool ok=PrintWindow(iconList,memory,3)!=FALSE;
-    if(ok) {
-        mask.bits.assign((count+7)/8,0);
-        const auto* pixels=static_cast<const uint32_t*>(bits);
-        size_t painted=0;
-        for(size_t i=0;i<count;i++) if(pixels[i]&0x00FFFFFFu) {
-            mask.bits[i/8]|=1u<<(i%8); painted++;
+// 图标单元格：新版 Explorer 的图标视图在同一张表面里既画壁纸又画图标，
+// 只能在 Shell 报告的单元格内部区分内容，所以先向 Explorer 取一次布局。
+// 布局取不到时遮罩为空：暗角照常绘制，图标随之变暗，而不是拒绝整块效果。
+bool ReadIconCells(std::vector<icon_mask::Cell>& cells) {
+    cells.clear();
+    if(!iconList || !IsWindowVisible(iconList)) return false;
+    DWORD pid=0; GetWindowThreadProcessId(iconList,&pid);
+    HANDLE process=OpenProcess(PROCESS_VM_OPERATION|PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+    if(!process) return false;
+    // 共享缓冲同时放 RECT 请求和 LVITEM（含标签文字），一次分配复用。
+    void* remote=VirtualAllocEx(process,nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+    if(!remote) { CloseHandle(process); return false; }
+    DWORD_PTR count=0;
+    bool ok=SendMessageTimeoutW(iconList,LVM_GETITEMCOUNT,0,0,SMTO_ABORTIFHUNG,200,&count)!=0 && count<=4096;
+    // 图标索引与标签文字一次取回：字形回退需要它们，正常路径不用也不额外通信。
+    const auto QueryItem=[&](DWORD_PTR index,icon_mask::Cell& cell) {
+        constexpr int TextCapacity=128;
+        LVITEMW item{};
+        item.mask=LVIF_IMAGE|LVIF_TEXT;
+        item.iItem=static_cast<int>(index);
+        item.cchTextMax=TextCapacity;
+        item.pszText=reinterpret_cast<LPWSTR>(static_cast<char*>(remote)+sizeof(LVITEMW));
+        if(!WriteProcessMemory(process,remote,&item,sizeof(item),nullptr)) return false;
+        DWORD_PTR answered=0;
+        if(!SendMessageTimeoutW(iconList,LVM_GETITEMW,0,reinterpret_cast<LPARAM>(remote),SMTO_ABORTIFHUNG,200,&answered)||!answered) return false;
+        LVITEMW answer{};
+        if(!ReadProcessMemory(process,remote,&answer,sizeof(answer),nullptr)) return false;
+        cell.image=answer.iImage;
+        wchar_t text[TextCapacity]{};
+        if(ReadProcessMemory(process,item.pszText,text,sizeof(text)-sizeof(wchar_t),nullptr)) cell.text.assign(text);
+        return true;
+    };
+    const auto Query=[&](DWORD_PTR index,int code,RECT& answer) {
+        RECT request{code,0,0,0};
+        if(!WriteProcessMemory(process,remote,&request,sizeof(request),nullptr)) return false;
+        DWORD_PTR answered=0;
+        if(!SendMessageTimeoutW(iconList,LVM_GETITEMRECT,static_cast<WPARAM>(index),
+            reinterpret_cast<LPARAM>(remote),SMTO_ABORTIFHUNG,120,&answered)||!answered) return false;
+        return ReadProcessMemory(process,remote,&answer,sizeof(answer),nullptr)!=FALSE;
+    };
+    // Explorer 卡顿时不能拖住消息循环：整批查询有上限，超时按“读不到布局”处理，
+    // 让所有图标一致地失去保护，而不是随机一半亮一半暗。
+    const double deadline=ClockMs()+600;
+    bool complete=true;
+    for(DWORD_PTR index=0;ok && index<count;++index) {
+        icon_mask::Cell cell;
+        if(Query(index,LVIR_BOUNDS,cell.bounds) && cell.bounds.right>cell.bounds.left && cell.bounds.bottom>cell.bounds.top) {
+            if(!Query(index,LVIR_LABEL,cell.label)) cell.label={};
+            QueryItem(index,cell);
+            cells.push_back(cell);
         }
-        // Reject a wallpaper-backed capture rather than punching out the whole desktop.
-        if(painted>count*3/4) { mask.bits.clear(); ok=false; }
+        if(ClockMs()>deadline) { complete=false; break; }
     }
-    SelectObject(memory,previous); DeleteObject(bitmap); DeleteDC(memory); ReleaseDC(nullptr,screen);
-    return ok;
+    VirtualFreeEx(process,remote,0,MEM_RELEASE); CloseHandle(process);
+    return ok && complete;
+}
+void ReleaseIconMaskShare() {
+    if(iconMaskView) { UnmapViewOfFile(iconMaskView); iconMaskView=nullptr; }
+    if(iconMaskMapping) { CloseHandle(iconMaskMapping); iconMaskMapping=nullptr; }
+    iconMaskCapacity=0;
+}
+// 遮罩是只读数据，跨进程共享比在设置窗口里重做一遍判定更省。
+// 换代次序固定：先作废旧代次并写完内容，最后提交新代次。
+bool PublishIconMask(const IconMask& mask) {
+    const size_t payload=mask.bits.size();
+    const size_t total=sizeof(IconMaskShare)+payload;
+    if(!iconMaskMapping || iconMaskCapacity<total) {
+        ReleaseIconMaskShare();
+        const ULONGLONG size=static_cast<ULONGLONG>(total);
+        HANDLE mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,
+            static_cast<DWORD>(size>>32),static_cast<DWORD>(size),L"Local\\Nocturne.IconMask.v1");
+        if(!mapping) return false;
+        void* view=MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,total);
+        if(!view) { CloseHandle(mapping); return false; }
+        iconMaskMapping=mapping; iconMaskView=view; iconMaskCapacity=total;
+        ZeroMemory(view,total);
+    }
+    auto* header=static_cast<IconMaskShare*>(iconMaskView);
+    header->magic=0;
+    MemoryBarrier();
+    if(payload) memcpy(header+1,mask.bits.data(),payload);
+    header->version=1;
+    header->width=static_cast<uint32_t>(mask.width); header->height=static_cast<uint32_t>(mask.height);
+    header->bytes=static_cast<uint32_t>(payload);
+    header->left=mask.rect.left; header->top=mask.rect.top;
+    ++header->generation;
+    MemoryBarrier();
+    header->magic=IconMaskMagic;
+    return true;
+}
+bool ReadIconMask(IconMask& mask) {
+    mask.bits.clear(); mask.width=0; mask.height=0; mask.rect={}; iconMaskUnavailable=false;
+    if(!iconList || !IsWindowVisible(iconList)) { PublishIconMask(mask); return true; } // 没有图标视图就不需要保护
+    RECT client{};
+    if(!GetClientRect(iconList,&client)) return false;
+    POINT origin{};
+    if(!ClientToScreen(iconList,&origin)) return false;
+    mask.rect={origin.x,origin.y,origin.x+client.right,origin.y+client.bottom};
+    mask.width=client.right; mask.height=client.bottom;
+    const size_t count=static_cast<size_t>(mask.width)*mask.height;
+    if(mask.width<1 || mask.height<1 || count>160000000) return false;
+    std::vector<icon_mask::Cell> cells;
+    const bool layout=ReadIconCells(cells);
+    // 布局读到却没有单元格：桌面本来就没有图标，不需要保护，也不必提示。
+    if(cells.empty()) { iconMaskUnavailable=!layout; PublishIconMask(mask); return true; }
+    // 客户端区对齐到位图左上角；单元格与截图使用同一坐标系。
+    Bitmap capture;
+    if(!capture.Create(mask.width,mask.height)) { iconMaskUnavailable=true; PublishIconMask(mask); return true; }
+    ZeroMemory(capture.pixels,count*sizeof(uint32_t));
+    if(!PrintWindow(iconList,capture.dc,3)) { iconMaskUnavailable=true; PublishIconMask(mask); return true; }
+    std::vector<size_t> unresolved;
+    icon_mask::Segment(mask.bits,mask.width,mask.height,capture.pixels,cells,&unresolved);
+    icon_glyph::Resolve(mask.bits,mask.width,mask.height,capture.pixels,cells,unresolved,
+        static_cast<int>(GetDpiForWindow(iconList)));
+    PublishIconMask(mask);
+    return true;
 }
 void DropSurface(Surface& s) {
     if(IsWindow(s.hwnd)) DestroyWindow(s.hwnd);
@@ -865,6 +974,7 @@ bool Rebuild() {
     SetVisibility(visible,params.focusOnly);
     if(!transition.Target()&&visible) return false;
     std::wstring message=params.focusOnly?L"暗角已应用 · 存在应用窗口时启用":L"暗角已应用";
+    if(!params.darkenIcons&&iconMaskUnavailable) message+=L" · 未能识别桌面图标，图标将一并压暗";
     if(params.blurEnabled) {
         if(!RefreshBlurLayers()) {
             wchar_t error[100]; swprintf(error,100,L" · 模糊不可用（0x%08lX），暗角保留",static_cast<unsigned long>(blurLastResult));
@@ -887,7 +997,11 @@ bool Rebuild() {
     Status(message.c_str()); return true;
 }
 void OpenSettings() {
-    wchar_t exe[32768]; GetModuleFileNameW(nullptr,exe,32768);
+    wchar_t exe[32768]{};
+    if(GetModuleFileNameW(nullptr,exe,32768)==0) {
+        MessageBoxW(nullptr,L"无法定位程序目录，请从开始菜单重新打开设置。",L"Penumbra",MB_OK|MB_ICONERROR);
+        return;
+    }
     std::wstring path=exe; path=path.substr(0,path.find_last_of(L"\\/")+1)+L"Penumbra.exe";
     if(reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr,L"open",path.c_str(),nullptr,nullptr,SW_SHOWNORMAL))<=32)
         MessageBoxW(nullptr,L"无法打开设置。请保持 Penumbra.exe 与原生程序位于同一文件夹。",L"Penumbra",MB_OK|MB_ICONERROR);
@@ -1278,6 +1392,6 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     if(moveSizeHook) UnhookWinEvent(moveSizeHook);
     if(reorderHook) UnhookWinEvent(reorderHook);
     if(iconHook) UnhookWinEvent(iconHook);
-    Clear(); blurEngine.reset(); trayIcon.Reset();
+    Clear(); ReleaseIconMaskShare(); blurEngine.reset(); trayIcon.Reset();
     DestroyWindow(controller); CloseHandle(stopEvent); CloseHandle(reloadEvent); CloseHandle(appliedEvent); CloseHandle(mutex); return 0;
 }
