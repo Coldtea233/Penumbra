@@ -134,7 +134,7 @@ inline void Resolve(std::vector<unsigned char>& bits,int width,int height,const 
         const long side=box.right-box.left;
         IImageList** slot=(side>56)?&detailed:&compact;
         if(!*slot) {
-            if(!SHGetImageList((side>56)?SHIL_JUMBO:SHIL_EXTRALARGE,IID_IImageList,reinterpret_cast<void**>(slot))||!*slot)
+            if(FAILED(SHGetImageList((side>56)?SHIL_JUMBO:SHIL_EXTRALARGE,__uuidof(IImageList),reinterpret_cast<void**>(slot))))
                 *slot=nullptr;
         }
         WriteGlyph(bits,width,height,*slot,cell.image,box);

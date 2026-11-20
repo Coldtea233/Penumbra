@@ -346,14 +346,16 @@ bool ReadIconCells(std::vector<icon_mask::Cell>& cells) {
     bool complete=true;
     for(DWORD_PTR index=0;ok && index<count;++index) {
         icon_mask::Cell cell;
-        if(Query(index,LVIR_BOUNDS,cell.bounds) && cell.bounds.right>cell.bounds.left && cell.bounds.bottom>cell.bounds.top) {
+        if(!Query(index,LVIR_BOUNDS,cell.bounds)) { complete=false; break; }
+        if(cell.bounds.right>cell.bounds.left && cell.bounds.bottom>cell.bounds.top) {
             if(!Query(index,LVIR_LABEL,cell.label)) cell.label={};
-            QueryItem(index,cell);
-            cells.push_back(cell);
+            if(ClockMs()<=deadline) QueryItem(index,cell);
+            cells.push_back(std::move(cell));
         }
         if(ClockMs()>deadline) { complete=false; break; }
     }
     VirtualFreeEx(process,remote,0,MEM_RELEASE); CloseHandle(process);
+    if(!ok || !complete) cells.clear();
     return ok && complete;
 }
 void ReleaseIconMaskShare() {
@@ -390,32 +392,32 @@ bool PublishIconMask(const IconMask& mask) {
     header->magic=IconMaskMagic;
     return true;
 }
-bool ReadIconMask(IconMask& mask) {
+void ReadIconMask(IconMask& mask) {
     mask.bits.clear(); mask.width=0; mask.height=0; mask.rect={}; iconMaskUnavailable=false;
-    if(!iconList || !IsWindowVisible(iconList)) { PublishIconMask(mask); return true; } // 没有图标视图就不需要保护
+    if(!iconList || !IsWindowVisible(iconList)) { PublishIconMask(mask); return; } // 没有图标视图就不需要保护
+    const auto useEmptyMask=[&] { iconMaskUnavailable=true; PublishIconMask(mask); };
     RECT client{};
-    if(!GetClientRect(iconList,&client)) return false;
     POINT origin{};
-    if(!ClientToScreen(iconList,&origin)) return false;
+    if(!GetClientRect(iconList,&client) || !ClientToScreen(iconList,&origin)) { useEmptyMask(); return; }
     mask.rect={origin.x,origin.y,origin.x+client.right,origin.y+client.bottom};
     mask.width=client.right; mask.height=client.bottom;
     const size_t count=static_cast<size_t>(mask.width)*mask.height;
-    if(mask.width<1 || mask.height<1 || count>160000000) return false;
+    if(mask.width<1 || mask.height<1 || count>160000000) { useEmptyMask(); return; }
     std::vector<icon_mask::Cell> cells;
     const bool layout=ReadIconCells(cells);
     // 布局读到却没有单元格：桌面本来就没有图标，不需要保护，也不必提示。
-    if(cells.empty()) { iconMaskUnavailable=!layout; PublishIconMask(mask); return true; }
+    if(!layout) { useEmptyMask(); return; }
+    if(cells.empty()) { PublishIconMask(mask); return; }
     // 客户端区对齐到位图左上角；单元格与截图使用同一坐标系。
     Bitmap capture;
-    if(!capture.Create(mask.width,mask.height)) { iconMaskUnavailable=true; PublishIconMask(mask); return true; }
+    if(!capture.Create(mask.width,mask.height)) { useEmptyMask(); return; }
     ZeroMemory(capture.pixels,count*sizeof(uint32_t));
-    if(!PrintWindow(iconList,capture.dc,3)) { iconMaskUnavailable=true; PublishIconMask(mask); return true; }
+    if(!PrintWindow(iconList,capture.dc,3)) { useEmptyMask(); return; }
     std::vector<size_t> unresolved;
     icon_mask::Segment(mask.bits,mask.width,mask.height,capture.pixels,cells,&unresolved);
     icon_glyph::Resolve(mask.bits,mask.width,mask.height,capture.pixels,cells,unresolved,
         static_cast<int>(GetDpiForWindow(iconList)));
     PublishIconMask(mask);
-    return true;
 }
 void DropSurface(Surface& s) {
     if(IsWindow(s.hwnd)) DestroyWindow(s.hwnd);
@@ -956,7 +958,8 @@ bool Rebuild() {
     if(paused) { Status(L"桌面效果已暂停 · 可从托盘恢复"); return true; }
     if(!LocateDesktop()) { Status(L"未找到桌面宿主 · 已安全隐藏，将自动重试"); return false; }
     IconMask fresh;
-    if(!params.darkenIcons&&!ReadIconMask(fresh)) { Status(L"无法读取桌面图标遮罩 · 未启用暗角"); return false; }
+    if(!params.darkenIcons) ReadIconMask(fresh);
+    else PublishIconMask(fresh);
     iconMask=std::move(fresh); iconsDirty=false;
     frameIntervalMs=1000.0/60;
     detectedRefreshHz=0;
@@ -1188,13 +1191,11 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if(animationTimerArmed) { SetTimer(hwnd,5,120,nullptr); return 0; }
             if(!paused&&(transition.Target()||animationTimerArmed)) {
                 IconMask fresh;
-                if(ReadIconMask(fresh)) {
-                    iconsDirty=false;
-                    if(fresh.bits!=iconMask.bits || !EqualRect(&fresh.rect,&iconMask.rect)) {
-                        iconMask=std::move(fresh);
-                        if(animationTimerArmed) AdvanceAnimation();
-                        else for(auto& s:surfaces) if(!Render(s)) { FailTransition(); break; }
-                    }
+                ReadIconMask(fresh);
+                iconsDirty=false;
+                if(fresh.bits!=iconMask.bits || !EqualRect(&fresh.rect,&iconMask.rect)) {
+                    iconMask=std::move(fresh);
+                    for(auto& s:surfaces) if(!Render(s)) { FailTransition(); break; }
                 }
             }
         }

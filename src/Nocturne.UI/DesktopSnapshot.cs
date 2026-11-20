@@ -120,7 +120,7 @@ internal sealed record DesktopSnapshot(byte[] Pixels, int Width, int Height, byt
         byte* pixelsOfWindow = null;
         try
         {
-            if (composite)
+            if (composite || shared is null)
             {
                 bitmap = CreateDIBSection(memory, ref info, 0, out var bits, IntPtr.Zero, 0);
                 if (memory == IntPtr.Zero || bitmap == IntPtr.Zero) return mask;
@@ -153,6 +153,7 @@ internal sealed record DesktopSnapshot(byte[] Pixels, int Width, int Height, byt
                     if (mask[y * width + x] == 0) continue;
                     int sx = (int)((x + .5) * sourceWidth / width) - bounds.Left;
                     int sy = (int)((y + .5) * sourceHeight / height) - bounds.Top;
+                    if (sx < 0 || sy < 0 || sx >= bounds.Width || sy >= bounds.Height) continue;
                     int color = Marshal.ReadInt32((IntPtr)pixelsOfWindow, (sy * bounds.Width + sx) * 4), i = (y * width + x) * 4;
                     pixels[i] = (byte)color; pixels[i + 1] = (byte)(color >> 8); pixels[i + 2] = (byte)(color >> 16);
                 }
@@ -198,7 +199,9 @@ internal sealed record DesktopSnapshot(byte[] Pixels, int Width, int Height, byt
                 int left = Marshal.ReadInt32(view, 20), top = Marshal.ReadInt32(view, 24);
                 var bits = new byte[payload];
                 Marshal.Copy(view + headerSize, bits, 0, bits.Length);
-                if (Marshal.ReadInt64(view, 32) == generation) return new SharedMask(bits, width, height, left, top);
+                Thread.MemoryBarrier();
+                if ((uint)Marshal.ReadInt32(view, 0) == magic && Marshal.ReadInt64(view, 32) == generation)
+                    return new SharedMask(bits, width, height, left, top);
             }
             return null;
         }
