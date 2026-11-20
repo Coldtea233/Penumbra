@@ -9,7 +9,7 @@
         <Image x:Name="TitleAppIcon" Width="22" Height="22" AutomationProperties.Name="Penumbra 图标">
           <Image.Source><BitmapImage UriSource="ms-appx:///Assets/AppIcon.png" DecodePixelWidth="64"/></Image.Source>
         </Image>
-        <TextBlock Text="Penumbra" FontSize="15" FontWeight="SemiBold"/>
+        <TextBlock Text="{x:Bind ApplicationName}" FontSize="15" FontWeight="SemiBold"/>
       </StackPanel>
     </Grid>
     <ScrollViewer x:Name="SettingsScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled" SizeChanged="Preview_SizeChanged">
@@ -176,7 +176,22 @@
           </ComboBox>
           <CheckBox x:Name="DarkenIconsCheckBox" Content="压暗桌面图标" Checked="IconOption_Changed" Unchecked="IconOption_Changed"/>
           <StackPanel Spacing="6" Margin="0,4,0,0">
-            <CheckBox x:Name="FocusOnlyCheckBox" Content="前台无窗口时不启用暗角"/>
+            <CheckBox x:Name="FocusOnlyCheckBox" Content="仅在有窗口时淡入暗角"/>
+            <StackPanel>
+              <Grid ColumnSpacing="6">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <TextBlock Text="动画速率" VerticalAlignment="Center"/>
+                <HyperlinkButton x:Name="AnimationTestLink" Grid.Column="1" Content="高级设置" Click="AnimationTest_Click" Padding="4,3"/>
+              </Grid>
+              <Slider x:Name="AnimationSpeedSlider" AutomationProperties.Name="动画速率（快速、均衡、优雅）"
+                      Minimum="0" Maximum="2" Value="1" StepFrequency="1" SmallChange="1" LargeChange="1"
+                      SnapsTo="StepValues" TickFrequency="1" TickPlacement="BottomRight" IsThumbToolTipEnabled="False"/>
+              <Grid Margin="0,2,0,0">
+                <TextBlock Text="快速" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Left"/>
+                <TextBlock Text="均衡" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Center"/>
+                <TextBlock Text="优雅" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" HorizontalAlignment="Right"/>
+              </Grid>
+            </StackPanel>
           </StackPanel>
         </StackPanel>
       </Grid>

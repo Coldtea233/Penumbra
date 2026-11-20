@@ -49,7 +49,7 @@ int main() {
     }
     PumpFor(500);
     double start=ClockMs(),cpu=CpuMs(); PumpFor(8000); Result("HiddenIdle",ClockMs()-start,CpuMs()-cpu);
-    const double settle=focus_animation::Transition::DurationMs+60;
+    const double settle=params.animationDurationMs+60;
     SetBlurVisibility(true); PumpFor(settle);
     bool visible=!blurSurfaces.empty()&&IsWindowVisible(blurSurfaces[0].composition.hwnd)&&!blurTimerArmed;
     POINT point{GetSystemMetrics(SM_CXSCREEN)-20,GetSystemMetrics(SM_CYSCREEN)-100};

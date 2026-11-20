@@ -77,7 +77,7 @@ int main() {
     if(!blurSurfaces.empty()) {
         auto& current=blurSurfaces.front();auto window=current.composition.hwnd;auto brush=current.composition.effect.Get();
         check(GetWindow(window,GW_OWNER)==desktop&&!(GetWindowLongPtrW(window,GWL_STYLE)&WS_CHILD),"blur is above whole desktop, not a wallpaper-only child");
-        blurTransition.Reset(true);AdvanceBlurAnimation();
+        blurTransition.Reset(true);FinishBlurAnimation();
         check(IsWindowVisible(window)&&WindowAbove(window,surfaces.front().hwnd)&&WindowAbove(surfaces.front().hwnd,desktop),"strict order: desktop/icons, protected vignette, then Gaussian");
         check(!blurTimerArmed&&!blurAnimationTick,"visible endpoint has no frame timer");
         check(current.composition.brushAttached,"visible blur samples its backdrop");
@@ -123,12 +123,43 @@ int main() {
         capturingPreview=true;PositionBlurSurfaces();check(!IsWindowVisible(window)&&!current.composition.brushAttached,"explicit suppression hides and detaches sampling");
         capturingPreview=false;PositionSurface(surfaces.front(),true);PositionBlurSurfaces();
         check(IsWindowVisible(window)&&WindowAbove(window,surfaces.front().hwnd),"restoring either layer restores correct order");
-        blurTransition.Reset(false);AdvanceBlurAnimation();
+        blurTransition.Reset(false);FinishBlurAnimation();
         check(!IsWindowVisible(window)&&!blurTimerArmed,"hidden endpoint releases frame timer");
-        SetBlurVisibility(true);check(blurTimerArmed&&blurTransition.Value(ClockMs())<.15,"cold fade starts transparent");
-        double value=blurTransition.Value(ClockMs());SetBlurVisibility(false);
-        check(std::abs(blurTransition.Value(ClockMs())-value)<.04,"rapid reversal remains continuous");
-        blurTransition.Reset(true);AdvanceBlurAnimation();
+        for(int duration:{520,800,1200,2350}) {
+            params.animationDurationMs=duration;
+            double start=ClockMs();
+            SetBlurVisibility(true);
+            double remaining=blurTransition.Remaining(ClockMs());
+            check(blurTimerArmed&&remaining<=duration&&remaining>=duration-(ClockMs()-start)-1,
+                "compositor blur uses the preset or custom duration");
+            if(blurAnimationTick) check(WaitForSingleObject(blurAnimationTick,70)==WAIT_TIMEOUT,
+                "long fade does not wake the renderer every frame");
+            double value=blurTransition.Value(ClockMs());
+            SetBlurVisibility(false);
+            double reversed=blurTransition.Value(ClockMs());
+            check(blurTimerArmed&&!blurTransition.Target()&&std::abs(reversed-value)<.12,
+                "rapid reversal stays on the compositor and continues from the current opacity");
+            FinishBlurAnimation();
+            check(!IsWindowVisible(window)&&!blurAnimationTick&&!current.composition.brushAttached,
+                "off endpoint detaches blur sampling and closes the one-shot timer");
+        }
+        params.animationDurationMs=180;
+        SetBlurVisibility(true);
+        check(blurAnimationTick&&WaitForSingleObject(blurAnimationTick,650)==WAIT_OBJECT_0,
+            "fade schedules a wake at its endpoint");
+        if(blurAnimationTick) check(WaitForSingleObject(blurAnimationTick,40)==WAIT_TIMEOUT,
+            "completion timer is one-shot");
+        FinishBlurAnimation();
+        check(IsWindowVisible(window)&&!blurAnimationTick,"visible endpoint holds without waking again");
+        SetBlurVisibility(false);
+        FinishBlurAnimation();
+        params.animationDurationMs=0;
+        SetBlurVisibility(true);
+        check(IsWindowVisible(window)&&!blurAnimationTick,"0 ms shows blur immediately");
+        SetBlurVisibility(false);
+        check(!IsWindowVisible(window)&&!blurAnimationTick&&!current.composition.brushAttached,
+            "0 ms hides blur and detaches sampling immediately");
+        SetBlurVisibility(true);
         check(WindowAbove(window,surfaces.front().hwnd),"animation endpoint preserves ordering");
     }
     HWND wallpaper=CreateWindowExW(WS_EX_NOACTIVATE,L"STATIC",L"Own color wallpaper",WS_CHILD|WS_VISIBLE,0,0,96,64,desktop,nullptr,instance,nullptr);

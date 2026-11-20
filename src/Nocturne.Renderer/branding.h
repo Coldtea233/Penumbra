@@ -38,7 +38,11 @@ public:
         data.uFlags=NIF_ICON; data.hIcon=fresh;
         if(add) {
             data.uFlags|=NIF_MESSAGE|NIF_TIP; data.uCallbackMessage=callback;
+#ifdef PENUMBRA_STORE
+            lstrcpyW(data.szTip,L"沉浸式桌面");
+#else
             lstrcpyW(data.szTip,L"Penumbra");
+#endif
         }
         if(!Shell_NotifyIconW(add?NIM_ADD:NIM_MODIFY,&data)) { DestroyIcon(fresh); return false; }
         if(icon) DestroyIcon(icon);

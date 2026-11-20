@@ -14,7 +14,7 @@
 
 - **优秀的性能**：约30MB内存占用 0.02% CPU占用
 - **仅在必要时生效**：仅在前台存在窗口时启用 暗角/模糊 效果（可开关）
-- **非线性动画**：暗角切入/切出动画使用720 毫秒强缓出曲线
+- **非线性动画**：暗角与模糊共用缓出曲线，快速、均衡、优雅默认分别为 520、800、1200 毫秒，可在高级设置中调整。
 - **原生UI**：设置界面采用Windows原生WinUI3设计语言
 
 ## 效果预览
@@ -42,7 +42,7 @@ Windows 合成器另持有每屏透明表面；3840×2160 的 32 位表面约 31
 
 ## 构建
 
-当前版本为 **v1.8.3**。窗口接近方形时仍保持双栏；横排预览限制高度，参数栏弹性填满剩余宽度。竖排预览按宽度等比铺满，“关于”位于参数下方。打开另一目录的同版本修订或较新版本，会请求旧设置窗口正常退出并接管；同路径重复启动唤回原窗口，旧版不会替换新版。桌面后台及未保存参数保持原有行为。
+当前版本为 **v1.9.0**。默认使用均衡档（800 毫秒）。窗口接近方形时仍保持双栏；横排预览限制高度，参数栏弹性填满剩余宽度。竖排预览按宽度等比铺满，“关于”位于参数下方。打开另一目录的同版本修订或较新版本，会请求旧设置窗口正常退出并接管；同路径重复启动唤回原窗口，旧版不会替换新版。桌面后台及未保存参数保持原有行为。
 
 需要 .NET 8 SDK、可访问 NuGet 的网络、Windows x64 和 llvm-mingw UCRT x64 工具链。本次使用 20261020 版 llvm-mingw。
 
@@ -50,17 +50,17 @@ Windows 合成器另持有每屏透明表面；3840×2160 的 32 位表面约 31
 ./build.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 # 生成内部 Windows Installer 载荷，再打包为对外发布的 EXE
 ./installer/build-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
-./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-v1.8.3/Penumbra-v1.8.3-Setup-x64.msi' -OutputDirectory './dist/release-v1.8.3' -IconPath './assets/branding/AppIcon.ico'
+./installer/build-exe-installer.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64' -PayloadPath './dist/release-v1.9.0/Penumbra-v1.9.0-Setup-x64.msi' -OutputDirectory './dist/release-v1.9.0' -IconPath './assets/branding/AppIcon.ico'
 # 原生动画、图标保护、快速反向和资源释放测试，不操作现有应用窗口
 ./tests/run.ps1 -Toolchain 'D:\Tools\llvm-mingw-20261020-ucrt-x86_64'
 ```
 
-程序产物为 `dist\Penumbra-v1.8.3` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-v1.8.3\Penumbra-v1.8.3-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
+程序产物为 `dist\Penumbra-v1.9.0` 完整目录，入口为顶层的 `Penumbra.exe`；安装包为 `dist\release-v1.9.0\Penumbra-v1.9.0-Setup-x64.exe`。打包脚本需 PowerShell 7；其构建中间文件不是发行附件。安装包与便携构建均未签名。`app\Nocturne.Renderer.exe --self-test` 仅验证暗角和动画数学性质，不能替代桌面视觉验收。需要排查时，可用 `--trace-animation` 单次启动后台，在配置目录生成数字帧日志与窗口诊断；默认关闭，不记录屏幕图像。GitHub 与 bilibili 图标许可见 `docs\THIRD-PARTY-NOTICES.txt`。
 
 ## 发行目录
 
 ```text
-Penumbra-v1.8.3/
+Penumbra-v1.9.0/
   Penumbra.exe   启动入口（启动界面后立即退出，不常驻）
   README.md      使用说明
   app/           程序本体、后台、全部 DLL、语言和头像资源

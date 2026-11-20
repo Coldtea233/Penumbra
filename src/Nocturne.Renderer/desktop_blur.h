@@ -13,6 +13,7 @@
 #include <windows.graphics.effects.h>
 #include <wrl/client.h>
 #include <atomic>
+#include <cmath>
 #include <utility>
 #include "blur_parameters.h"
 
@@ -25,6 +26,22 @@ struct Compositor2 : IInspectable {
     virtual HRESULT STDMETHODCALLTYPE CreateAmbientLight(IInspectable**) = 0;
     virtual HRESULT STDMETHODCALLTYPE CreateAnimationGroup(IInspectable**) = 0;
     virtual HRESULT STDMETHODCALLTYPE CreateBackdropBrush(IInspectable**) = 0;
+};
+// ABI of IKeyFrameAnimation through InsertExpressionKeyFrame. The MinGW
+// header exposes IScalarKeyFrameAnimation but omits this base-class interface.
+struct KeyFrameAnimation : IInspectable {
+    virtual HRESULT STDMETHODCALLTYPE get_DelayTime(F::TimeSpan*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_DelayTime(F::TimeSpan) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_Duration(F::TimeSpan*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_Duration(F::TimeSpan) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_IterationBehavior(INT32*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_IterationBehavior(INT32) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_IterationCount(INT32*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_IterationCount(INT32) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_KeyFrameCount(INT32*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE get_StopBehavior(INT32*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE put_StopBehavior(INT32) = 0;
+    virtual HRESULT STDMETHODCALLTYPE InsertExpressionKeyFrame(FLOAT,HSTRING) = 0;
 };
 struct DesktopInterop : IUnknown {
     virtual HRESULT STDMETHODCALLTYPE CreateDesktopWindowTarget(HWND,BOOL,IInspectable**) = 0;
@@ -42,6 +59,7 @@ struct EffectInterop : IUnknown {
 };
 }
 __CRT_UUID_DECL(desktop_blur::Compositor2,0x735081dc,0x5e24,0x45da,0xa3,0x8f,0xe3,0x2c,0xc3,0x49,0xa9,0xa0)
+__CRT_UUID_DECL(desktop_blur::KeyFrameAnimation,0x126e7f22,0x3ae9,0x4540,0x9a,0x8a,0xde,0xae,0x8a,0x4a,0x4a,0x84)
 __CRT_UUID_DECL(desktop_blur::DesktopInterop,0x29e691fa,0x4567,0x4dca,0xb3,0x19,0xd0,0xf2,0x07,0xeb,0x68,0x07)
 __CRT_UUID_DECL(desktop_blur::SourceFactory,0xb3d9f276,0xaba3,0x4724,0xac,0xf3,0xd0,0x39,0x74,0x64,0xdb,0x1c)
 __CRT_UUID_DECL(desktop_blur::EffectInterop,0x2fc57384,0xa068,0x44d7,0xa3,0x31,0x30,0x98,0x2f,0xcf,0x71,0x77)
@@ -267,6 +285,35 @@ public:
             hwnd=nullptr;
         }
     };
+    // Use the same cubic Bézier as focus_animation::EaseOut. StartingValue
+    // preserves the compositor's current opacity when a fade is reversed.
+    HRESULT CreateOpacityAnimation(double milliseconds,float target,ComPtr<C::ICompositionAnimation>& animation) {
+        ComPtr<C::IScalarKeyFrameAnimation> scalar;
+        ComPtr<KeyFrameAnimation> timing;
+        ComPtr<C::ICubicBezierEasingFunction> bezier;
+        ComPtr<C::ICompositionEasingFunction> easing;
+        HRESULT hr;
+        if(FAILED(hr=compositor->CreateScalarKeyFrameAnimation(&scalar))) return hr;
+        if(FAILED(hr=scalar.As(&timing))) return hr;
+        if(FAILED(hr=compositor->CreateCubicBezierEasingFunction({.16f,1},{.30f,1},&bezier))) return hr;
+        if(FAILED(hr=bezier.As(&easing))) return hr;
+        if(FAILED(hr=timing->put_Duration({static_cast<INT64>(std::ceil(milliseconds*10000))}))) return hr;
+        if(FAILED(hr=timing->InsertExpressionKeyFrame(0,String(L"this.StartingValue")))) return hr;
+        if(FAILED(hr=scalar->InsertKeyFrameWithEasingFunction(1,target,easing.Get()))) return hr;
+        return scalar.As(&animation);
+    }
+    HRESULT StartOpacityAnimation(Surface& surface,C::ICompositionAnimation* animation) {
+        ComPtr<C::ICompositionObject> visual;
+        HRESULT hr=surface.visual.As(&visual);
+        return FAILED(hr)?hr:visual->StartAnimation(String(L"Opacity"),animation);
+    }
+    HRESULT FinishOpacityAnimation(Surface& surface,float opacity) {
+        ComPtr<C::ICompositionObject> visual;
+        HRESULT hr=surface.visual.As(&visual);
+        if(FAILED(hr)) return hr;
+        if(FAILED(hr=visual->StopAnimation(String(L"Opacity")))) return hr;
+        return surface.visual->put_Opacity(opacity);
+    }
     HRESULT Attach(HWND hwnd,int width,int height,float radius,Surface& surface,Filter filter=Filter::Gaussian) {
         // Respect accessibility/transparency preferences.
         if(!TransparencyAllowed()) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);

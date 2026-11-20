@@ -14,16 +14,28 @@ int main() {
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     HWND foreground=GetForegroundWindow(); instance=GetModuleHandleW(nullptr);
-    check(LocateDesktop(),"locate actual desktop without moving it");
+    if(!LocateDesktop()) {
+        std::printf("SKIP: Explorer desktop host unavailable. GeometryChecks=%u Failures=%u\n",checks,failures);
+        return failures?1:77;
+    }
     WNDCLASSW wc{}; wc.hInstance=instance; wc.lpfnWndProc=SurfaceProc; wc.lpszClassName=L"Penumbra.BlurGeometryTest"; RegisterClassW(&wc);
     MONITORINFO info{sizeof(info)}; GetMonitorInfoW(MonitorFromPoint({0,0},MONITOR_DEFAULTTOPRIMARY),&info);
     blurEngine=std::make_unique<desktop_blur::Engine>(); params.blurEnabled=true; params.blurRadius=12;
     BlurSurface s; s.rect=info.rcMonitor;
     s.composition.hwnd=CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP|WS_EX_LAYERED|WS_EX_TRANSPARENT|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,wc.lpszClassName,L"",WS_POPUP,s.rect.left,s.rect.top,s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,desktop,nullptr,instance,nullptr);
     SetLayeredWindowAttributes(s.composition.hwnd,0,255,LWA_ALPHA);
-    check(SUCCEEDED(blurEngine->Attach(s.composition.hwnd,s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,12,s.composition)),"attach production composition graph");
+    HRESULT hr=blurEngine->Attach(s.composition.hwnd,s.rect.right-s.rect.left,s.rect.bottom-s.rect.top,12,s.composition);
+    if(FAILED(hr)) {
+        std::printf("FAIL attach production composition graph (0x%08lX): %ls\n",static_cast<unsigned long>(hr),blurEngine->stage);
+        s.composition.Reset();
+        return 1;
+    }
     blurSurfaces.push_back(std::move(s)); auto& surface=blurSurfaces.front();
-    check(ProtectBlurTaskbar(surface),"apply real taskbar clipping before show");
+    if(!ProtectBlurTaskbar(surface)) {
+        std::printf("FAIL apply real taskbar clipping before show\n");
+        ClearBlur();
+        return 1;
+    }
     HRGN actual=CreateRectRgn(0,0,0,0);
     check(GetWindowRgn(surface.composition.hwnd,actual)!=ERROR,"HWND region is present");
     RECT region{}; GetRgnBox(actual,&region); OffsetRect(&region,surface.rect.left,surface.rect.top);

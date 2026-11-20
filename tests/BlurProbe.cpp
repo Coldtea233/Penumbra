@@ -119,6 +119,33 @@ int main() {
             ++restoreChecks;
         }
         std::printf("SuspendResumePixelChecks=%u FailuresSoFar=%d\n",restoreChecks,failures);
+
+        // Read the same stationary pattern during a compositor animation. This
+        // process issues no opacity writes between the start and end samples.
+        using namespace desktop_blur;
+        ComPtr<C::ICompositionAnimation> fadeIn,fadeOut;
+        auto play=[&](ComPtr<C::ICompositionAnimation>& animation,float end) {
+            return SUCCEEDED(engine.CreateOpacityAnimation(1200,end,animation))&&
+                SUCCEEDED(engine.StartOpacityAnimation(surface,animation.Get()));
+        };
+        if(FAILED(engine.FinishOpacityAnimation(surface,0))) failures++;
+        Pump(100);
+        auto clear=ReadSample();
+        if(!play(fadeIn,1)) failures++;
+        Pump(170);
+        auto entering=ReadSample();
+        Pump(1100);
+        auto blurred=ReadSample();
+        if(!play(fadeOut,0)) failures++;
+        Pump(170);
+        auto leaving=ReadSample();
+        Pump(1100);
+        auto finished=ReadSample();
+        if(clear.rgb!=plain.rgb||finished.rgb!=clear.rgb||
+           !(clear.contrast>entering.contrast&&entering.contrast>blurred.contrast&&
+             blurred.contrast<leaving.contrast&&leaving.contrast<clear.contrast)) failures++;
+        std::printf("CompositorFadeContrast Clear=%.2f FadeIn=%.2f Blurred=%.2f FadeOut=%.2f Final=%.2f\n",
+            clear.contrast,entering.contrast,blurred.contrast,leaving.contrast,finished.contrast);
     }
     surface.Reset(); Pump(100);
     if(index==7) {

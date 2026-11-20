@@ -12,6 +12,10 @@ TestResults/
 *.pdb
 *.res
 *.zip
+*.msix
+*.msixbundle
+*.appx
+*.appxupload
 .env
 .env.*
 !.env.example

@@ -41,7 +41,7 @@ int main() {
     for(auto& s:surfaces) if(!Render(s,0)) return 2;
     Result("PrepareOnce",ClockMs()-start,CpuMs()-cpu);
     start=ClockMs();cpu=CpuMs();PumpFor(10000);Result("HiddenIdle",ClockMs()-start,CpuMs()-cpu);
-    const double settleMs=focus_animation::Transition::DurationMs+40;
+    const double settleMs=params.animationDurationMs+40;
     SetVisibility(true);PumpFor(settleMs);
     start=ClockMs();cpu=CpuMs();PumpFor(10000);Result("VisibleIdle",ClockMs()-start,CpuMs()-cpu);
     SetVisibility(false);PumpFor(settleMs);

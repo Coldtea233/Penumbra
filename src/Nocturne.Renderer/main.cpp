@@ -30,7 +30,12 @@ constexpr UINT TrayMessage = WM_APP + 1, ReorderMessage = WM_APP + 2, IconMessag
 constexpr UINT SettingsId = 101, ReloadId = 102, PauseId = 103, ExitId = 104;
 constexpr UINT BlurBoundsMessage=WM_APP+5, BlurRadiusMessage=WM_APP+6;
 constexpr UINT ColorValueMessage=WM_APP+7, ColorHostMessage=WM_APP+8;
-struct Params { double opacity=.68, radius=.48, feather=.65, shape=1, cx=.5, cy=.5, blurRadius=12, saturation=40; int tint=0; bool primary=false, darkenIcons=false, focusOnly=false, blurEnabled=false, saturationEnabled=false; };
+struct Params {
+    double opacity=.68, radius=.48, feather=.65, shape=1, cx=.5, cy=.5, blurRadius=12, saturation=40;
+    int tint=0;
+    bool primary=false, darkenIcons=false, focusOnly=false, blurEnabled=false, saturationEnabled=false;
+    int animationDurationMs=static_cast<int>(focus_animation::Transition::FullDurationMs(focus_animation::Speed::Balanced));
+};
 struct Bitmap {
     HDC dc{}; HBITMAP handle{}; HGDIOBJ previous{}; uint32_t* pixels{};
     int width=0, height=0;
@@ -85,7 +90,6 @@ std::unique_ptr<desktop_blur::Engine> blurEngine;
 std::vector<BlurSurface> blurSurfaces;
 focus_animation::Transition blurTransition;
 HANDLE blurAnimationTick{};
-double blurNextFrameAt=0;
 bool blurTimerArmed=false;
 bool blurBoundsPending=false;
 HANDLE blurPreviewProcess{};
@@ -175,6 +179,10 @@ void Load() {
     params.tint=(int)ReadNumber(L"tint",0,0,2); params.primary=ReadNumber(L"primaryOnly",0,0,1)==1;
     params.darkenIcons=ReadNumber(L"darkenIcons",0,0,1)==1;
     params.focusOnly=ReadNumber(L"focusOnly",0,0,1)==1;
+    auto vignetteSpeed=static_cast<focus_animation::Speed>(static_cast<int>(ReadNumber(L"vignetteSpeed",static_cast<int>(focus_animation::Speed::Balanced),0,2)));
+    const wchar_t* durationKeys[]={L"vignetteFastMs",L"vignetteBalancedMs",L"vignetteElegantMs"};
+    params.animationDurationMs=static_cast<int>(ReadNumber(durationKeys[static_cast<int>(vignetteSpeed)],
+        focus_animation::Transition::FullDurationMs(vignetteSpeed),0,focus_animation::Transition::MaxDurationMs));
     params.blurEnabled=ReadNumber(L"blurEnabled",0,0,1)==1;
     params.blurRadius=ReadNumber(L"blurRadius",12,0,48);
     params.saturationEnabled=ReadNumber(L"saturationEnabled",0,0,1)==1;
@@ -459,40 +467,44 @@ void RefreshBlurPolicy(HWND hwnd) {
     }
     else SetTimer(hwnd,2,250,nullptr);
 }
-void AdvanceBlurAnimation() {
-    double now=ClockMs();
-    bool running=blurTransition.Running(now);
-    double value=running?blurTransition.Value(now):(blurTransition.Target()?1:0);
-    for(auto& s:blurSurfaces) if(FAILED(s.composition.visual->put_Opacity(static_cast<float>(value)))) { FailBlur(); return; }
-    if(!running) {
-        blurTransition.Reset(blurTransition.Target()); StopBlurAnimation();
-        if(!PositionBlurSurfaces()) FailBlur();
-        return;
+void FinishBlurAnimation() {
+    const bool visible=blurTransition.Target();
+    blurTransition.Reset(visible);
+    StopBlurAnimation();
+    // Hide and detach sampling first at the off endpoint, then set the static
+    // value. A fully occluded monitor remains detached at either endpoint.
+    if(!visible&&!PositionBlurSurfaces()) { FailBlur(); return; }
+    for(auto& s:blurSurfaces) if(FAILED(blurEngine->FinishOpacityAnimation(s.composition,visible?1.0f:0.0f))) {
+        FailBlur(); return;
     }
-    // Only a short transition submits properties. No screenshots, CPU blur or
-    // continuous property/timer updates after the endpoint has been submitted.
-    do { blurNextFrameAt+=frameIntervalMs; } while(blurNextFrameAt<=now);
-    LARGE_INTEGER due{};
-    due.QuadPart=-(LONGLONG)std::max(1.0,10000*std::min(blurNextFrameAt-now,blurTransition.Remaining(now)));
-    if(!SetWaitableTimer(blurAnimationTick,&due,0,nullptr,nullptr,FALSE)) FailBlur();
+    if(visible&&!PositionBlurSurfaces()) FailBlur();
 }
 void SetBlurVisibility(bool visible) {
     visible=visible&&params.blurEnabled&&!paused;
     if(blurSurfaces.empty()||visible==blurTransition.Target()) return;
-    double now=ClockMs();
-    if(!blurTransition.Retarget(visible,now)) return;
-    if(!blurTimerArmed) {
-        blurAnimationTick=CreateWaitableTimerExW(nullptr,nullptr,0x00000002,TIMER_ALL_ACCESS);
-        if(!blurAnimationTick) blurAnimationTick=CreateWaitableTimerW(nullptr,FALSE,nullptr);
-        blurTimerArmed=blurAnimationTick!=nullptr;
-        if(!blurTimerArmed) { FailBlur(); return; }
-    }
-    // Commit the current opacity before unhiding, including cold starts and
-    // rapid reversals; a previously opaque surface can never flash on screen.
-    for(auto& s:blurSurfaces) if(FAILED(s.composition.visual->put_Opacity(static_cast<float>(blurTransition.Value(now))))) { FailBlur(); return; }
+    const double now=ClockMs();
+    if(!blurTransition.Retarget(visible,now,params.animationDurationMs)) return;
+    if(params.animationDurationMs==0) { FinishBlurAnimation(); return; }
+    const double duration=blurTransition.Remaining(now);
+    if(!blurAnimationTick) blurAnimationTick=CreateWaitableTimerW(nullptr,FALSE,nullptr);
+    if(!blurAnimationTick) { FinishBlurAnimation(); return; }
+    blurTimerArmed=true;
+
+    // A hidden surface is already transparent. Attach before submitting the
+    // fade so cold starts use the same path as subsequent reversals.
     if(!PositionBlurSurfaces()) { FailBlur(); return; }
-    blurNextFrameAt=now;
-    AdvanceBlurAnimation();
+    desktop_blur::ComPtr<desktop_blur::C::ICompositionAnimation> animation;
+    if(FAILED(blurEngine->CreateOpacityAnimation(duration,visible?1.0f:0.0f,animation))) {
+        FinishBlurAnimation(); return;
+    }
+    for(auto& s:blurSurfaces) if(FAILED(blurEngine->StartOpacityAnimation(s.composition,animation.Get()))) {
+        FinishBlurAnimation(); return;
+    }
+    // Windows samples the curve on compositor frames. The renderer wakes
+    // once to detach the blur graph after the final frame has been presented.
+    LARGE_INTEGER due{};
+    due.QuadPart=-static_cast<LONGLONG>(std::ceil((duration+frameIntervalMs)*10000));
+    if(!SetWaitableTimer(blurAnimationTick,&due,0,nullptr,nullptr,FALSE)) FinishBlurAnimation();
 }
 bool WantsDesktopBlur(bool enabled,bool isPaused,bool hasWindows,ForegroundKind kind,bool previousTarget=false) {
     return enabled&&!isPaused&&hasWindows&&
@@ -769,7 +781,7 @@ void AdvanceAnimation() {
 void SetVisibility(bool visible,bool animate=true) {
     if(paused||params.opacity==0) visible=false;
     double now=ClockMs();
-    if(!animate||params.opacity==0) {
+    if(!animate||params.opacity==0||params.animationDurationMs==0) {
         if(visible==transition.Target()&&!transition.Running(now)) return;
         transition.Reset(visible); AdvanceAnimation(); return;
     }
@@ -778,7 +790,7 @@ void SetVisibility(bool visible,bool animate=true) {
     // the OS-owned surface while hidden; CPU bitmap memory is already freed.
     if(visible) for(auto& s:surfaces) if(!s.uploaded&&!Render(s,0)) { FailTransition(); return; }
     now=ClockMs();
-    if(!transition.Retarget(visible,now)) return;
+    if(!transition.Retarget(visible,now,params.animationDurationMs)) return;
     if(!animationTimerArmed) {
         // WM_TIMER is low priority and can be starved by Explorer/accessibility
         // traffic. A waitable timer is handled directly by the message loop.
@@ -1144,6 +1156,32 @@ int SelfTest() {
         if(sample.value<lastValue||sample.value>1||sample.slope<0||sample.slope>lastSpeed+1e-10) return 12;
         lastValue=sample.value;lastSpeed=sample.slope;
     }
+    if(Transition::FullDurationMs(Speed::Fast)!=520||Transition::FullDurationMs(Speed::Balanced)!=800||
+       Transition::FullDurationMs(Speed::Elegant)!=1200||p.animationDurationMs!=800) return 13;
+    for(auto speed : {Speed::Fast,Speed::Balanced,Speed::Elegant}) {
+        Transition fade;
+        const double duration=Transition::FullDurationMs(speed);
+        fade.Retarget(true,0,duration);
+        if(fade.Value(0)!=0||fade.Value(duration)!=1||!fade.Running(duration-1)||fade.Running(duration)) return 14;
+        double last=0;
+        for(int i=1;i<=100;i++) {
+            const double value=fade.Value(duration*i/100);
+            if(value<last||value>1||std::abs(value-EaseOut(i/100.0).value)>1e-9) return 17;
+            last=value;
+        }
+        const double reversalTime=duration*.4;
+        const double beforeReversal=fade.Value(reversalTime);
+        fade.Retarget(false,reversalTime,duration);
+        if(fade.Value(reversalTime)!=beforeReversal||fade.Value(reversalTime+duration/10)>=beforeReversal||
+           fade.Value(reversalTime+duration)!=0||fade.Running(reversalTime+duration)) return 18;
+    }
+    Transition custom;
+    constexpr double start=500,duration=1770;
+    if(!custom.Retarget(true,start,duration)||custom.Remaining(start)!=duration||
+       std::abs(custom.Value(start+duration*.25)-EaseOut(.25).value)>1e-9||
+       custom.Running(start+duration)||custom.Value(start+duration)!=1) return 19;
+    if(!custom.Retarget(false,start+duration,0)||custom.Running(start+duration)||
+       custom.Value(start+duration)!=0) return 20;
     return 0;
 }
 bool DispatchWork(DWORD timeout=INFINITE) {
@@ -1159,7 +1197,7 @@ bool DispatchWork(DWORD timeout=INFINITE) {
     if(wait==WAIT_OBJECT_0||wait==WAIT_FAILED) return false;
     if(wait==WAIT_OBJECT_0+1) { paused=false; Load(); Rebuild(); }
     if(darkIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+darkIndex) AdvanceAnimation();
-    if(blurIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+blurIndex) AdvanceBlurAnimation();
+    if(blurIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+blurIndex) FinishBlurAnimation();
     if(previewIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+previewIndex) EndBlurRadiusPreview();
     if(colorIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorIndex) AdvanceColorAnimation();
     if(colorPreviewIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorPreviewIndex) EndSaturationPreview();

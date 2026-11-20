@@ -6,7 +6,6 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
-using Microsoft.Win32;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices.WindowsRuntime;
@@ -31,6 +30,8 @@ public sealed partial class MainWindow : Window
     private bool checkingWallpaperStatus;
     private bool windowClosed;
     private bool closeApproved, closePending;
+    private bool animationTestOpen;
+    private VignetteAnimationDurations animationDurations = VignetteAnimationDurations.Defaults;
     private bool startupUpdateChecked, checkingUpdate;
     private readonly CancellationTokenSource updateCancellation = new();
     private WriteableBitmap? previewBitmap;
@@ -38,8 +39,8 @@ public sealed partial class MainWindow : Window
     private byte[]? colorPreview;
     private double colorPreviewSaturation = -1;
     private bool colorPreviewDarkenIcons;
-    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private static string RendererPath => Path.Combine(AppContext.BaseDirectory, "Nocturne.Renderer.exe");
+    public string ApplicationName => AppDistribution.ApplicationName;
     public string DisplayVersion => "v" + UpdateChecker.DisplayVersion(typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!.InformationalVersion);
     public MainWindow()
     {
@@ -47,7 +48,12 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         if (StartupCheck.LayoutTestRequested) Root.LayoutUpdated += (_, _) => ReportLayoutTestState();
         UpdateInfoBar.Closed += (_, _) => UpdateInfoBar.Visibility = Visibility.Collapsed;
-        AutomationProperties.SetHelpText(CheckUpdateLink, "通过 GitHub Releases 检查新版本；启动时自动检查一次。");
+        Title = ApplicationName;
+        AutomationProperties.SetHelpText(CheckUpdateLink, AppDistribution.UpdateHelp);
+        ToolTipService.SetToolTip(CheckUpdateLink, AppDistribution.UpdateHelp);
+        AutomationProperties.SetName(UpdateReleaseLink, AppDistribution.IsStore ? "在 Microsoft Store 查看更新" : "在 GitHub 查看新版本");
+        AutomationProperties.SetName(TitleAppIcon, ApplicationName + " 图标");
+        StartupToggle.IsEnabled = false;
         StartupCheck.Stage("MainWindow XAML connected");
         SystemBackdrop = new MicaBackdrop();
         ExtendsContentIntoTitleBar = true;
@@ -136,8 +142,6 @@ public sealed partial class MainWindow : Window
         try
         {
             LoadControls(Settings.Load());
-            using var key = Registry.CurrentUser.OpenSubKey(RunKey);
-            StartupToggle.IsOn = key?.GetValue("Nocturne") is string;
         }
         catch (Exception e) { StatusText.Text = "读取配置失败：" + e.Message; }
         ready = true;
@@ -168,6 +172,8 @@ public sealed partial class MainWindow : Window
         TintCombo.SelectedIndex = s.Tint; MonitorCombo.SelectedIndex = s.PrimaryOnly ? 1 : 0;
         DarkenIconsCheckBox.IsChecked = s.DarkenIcons;
         FocusOnlyCheckBox.IsChecked = s.FocusOnly;
+        AnimationSpeedSlider.Value = (int)s.VignetteSpeed;
+        animationDurations = s.AnimationDurations;
         BlurEnabledCheckBox.IsOn = s.BlurEnabled;
         BlurRadiusSlider.Value = s.BlurRadius;
         SaturationEnabledCheckBox.IsOn = s.SaturationEnabled;
@@ -188,7 +194,25 @@ public sealed partial class MainWindow : Window
             OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) && BlurEnabledCheckBox.IsOn,
             BlurRadiusSlider.Value,
             OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) && SaturationEnabledCheckBox.IsOn,
-            SaturationSlider.Value);
+            SaturationSlider.Value,
+            (VignetteAnimationSpeed)(int)AnimationSpeedSlider.Value) { AnimationDurations = animationDurations };
+    }
+    private async void AnimationTest_Click(object sender, RoutedEventArgs e)
+    {
+        if (busy || animationTestOpen) return;
+        animationTestOpen = true;
+        try
+        {
+            var dialog = new VignetteTimingDialog(Root.XamlRoot, snapshot ?? StartupCheck.LayoutSnapshot(), ReadControls());
+            if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+                animationDurations = dialog.Durations;
+        }
+        catch (Exception ex)
+        {
+            StartupCheck.Stage("Animation timing dialog failed: " + ex);
+            StatusText.Text = "打开高级设置失败：" + ex.Message;
+        }
+        finally { animationTestOpen = false; }
     }
     private void UpdateSaturationControls()
     {
@@ -530,6 +554,8 @@ public sealed partial class MainWindow : Window
             _ = CheckForUpdatesAsync(automatic: true);
         }
         if (StartupCheck.Isolated) return;
+        await RefreshStartupAsync();
+        if (windowClosed) return;
         wallpaperStatusTimer.Start();
         _ = RefreshWallpaperStatusAsync();
         if (busy || snapshot is not null) return;
@@ -543,7 +569,9 @@ public sealed partial class MainWindow : Window
     {
         if (!ready || !Root.IsLoaded || !AppWindow.IsVisible || Root.ActualWidth <= 0 || Root.ActualHeight <= 0)
             throw new InvalidOperationException("Settings window was not loaded and visible.");
-        if (DisplayVersion != "v1.8.3" || AboutVersionText.Text != DisplayVersion ||
+        if (DisplayVersion != "v" + typeof(App).Assembly.GetName().Version!.ToString(3) || AboutVersionText.Text != DisplayVersion ||
+            Title != ApplicationName || AboutAppName.Text != "Penumbra" ||
+            FocusOnlyCheckBox.Content?.ToString() != "仅在有窗口时淡入暗角" ||
             CheckUpdateLabel.Text != "检查更新" || !CheckUpdateLink.IsEnabled ||
             CheckUpdateLabel.TextDecorations != Windows.UI.Text.TextDecorations.None ||
             StartupToggle.Header?.ToString() != "登录时自启动" || BlurTitle.Text != "实验性功能" ||
@@ -553,6 +581,17 @@ public sealed partial class MainWindow : Window
             throw new InvalidOperationException("Version, settings groups or command buttons failed initialization.");
         if (SaturationBox.Value != SaturationSlider.Value || BlurRadiusBox.Value != BlurRadiusSlider.Value)
             throw new InvalidOperationException("Settings number fields were not initialized from their sliders.");
+        var settings = ReadControls();
+        try
+        {
+            foreach (var speed in Enum.GetValues<VignetteAnimationSpeed>())
+            {
+                LoadControls(settings with { VignetteSpeed = speed });
+                if (AnimationSpeedSlider.Value != (int)speed || ReadControls().VignetteSpeed != speed)
+                    throw new InvalidOperationException("Vignette animation slider did not round-trip a preset.");
+            }
+        }
+        finally { LoadControls(settings); }
         if (startupUpdateChecked || checkingUpdate || UpdateInfoBar.IsOpen ||
             AboutVersionText.Foreground is not SolidColorBrush versionBrush ||
             CheckUpdateLabel.Foreground is not SolidColorBrush updateBrush || !versionBrush.Color.Equals(updateBrush.Color))
@@ -579,13 +618,13 @@ public sealed partial class MainWindow : Window
             PresentUpdateResult(new(UpdateState.Failed, "Offline fixture"), automatic: true);
             PresentUpdateResult(new(UpdateState.Current, "Current fixture"), automatic: true);
             if (UpdateInfoBar.IsOpen) throw new InvalidOperationException("Automatic current/error results must remain unobtrusive.");
-            var release = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/v1.8.4");
-            PresentUpdateResult(new(UpdateState.Available, "Available fixture", "1.8.4", release), automatic: true);
-            if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.8.4" ||
+            var release = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/v1.9.1");
+            PresentUpdateResult(new(UpdateState.Available, "Available fixture", "1.9.1", release), automatic: true);
+            if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.9.1" ||
                 UpdateReleaseLink.NavigateUri != release || UpdateReleaseLink.Visibility != Visibility.Visible)
                 throw new InvalidOperationException("Available updates must offer the correct release page.");
             VerifyUpdateNoticeAppearance();
-            PresentUpdateResult(new(UpdateState.Current, "当前版本已为最新发行版", "1.8.3"), automatic: false);
+            PresentUpdateResult(new(UpdateState.Current, "当前版本已为最新发行版", DisplayVersion[1..]), automatic: false);
             if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Severity != InfoBarSeverity.Success ||
                 UpdateInfoBar.Title != "当前版本已为最新发行版" || UpdateInfoBar.Message.Length != 0 ||
                 UpdateReleaseLink.NavigateUri is not null || UpdateReleaseLink.Visibility != Visibility.Collapsed)
@@ -672,6 +711,28 @@ public sealed partial class MainWindow : Window
     private async void CheckUpdate_Click(object sender, RoutedEventArgs e)
         => await CheckForUpdatesAsync(automatic: false);
 
+    private void PresentStartupStatus(StartupStatus status)
+    {
+        StartupToggle.IsOn = status.Enabled;
+        StartupToggle.IsEnabled = status.CanChange;
+        ToolTipService.SetToolTip(StartupToggle, status.Message ?? "点击“应用到桌面”后保存。");
+    }
+
+    private async Task RefreshStartupAsync()
+    {
+        try
+        {
+            var status = await AppDistribution.ReadStartupAsync();
+            if (!windowClosed) PresentStartupStatus(status);
+        }
+        catch (Exception ex)
+        {
+            if (windowClosed) return;
+            StartupToggle.IsEnabled = false;
+            ToolTipService.SetToolTip(StartupToggle, "无法读取自启动状态：" + ex.Message);
+        }
+    }
+
     private async Task CheckForUpdatesAsync(bool automatic)
     {
         if (windowClosed || checkingUpdate) return;
@@ -680,7 +741,8 @@ public sealed partial class MainWindow : Window
         CheckUpdateLabel.Text = "检查中…";
         try
         {
-            var result = await UpdateChecker.CheckAsync(DisplayVersion, updateCancellation.Token);
+            var result = await AppDistribution.CheckForUpdatesAsync(
+                WinRT.Interop.WindowNative.GetWindowHandle(this), DisplayVersion, updateCancellation.Token);
             if (windowClosed) return;
             PresentUpdateResult(result, automatic);
         }
@@ -702,7 +764,7 @@ public sealed partial class MainWindow : Window
         if (automatic && result.State != UpdateState.Available) return;
         UpdateInfoBar.Title = result.State switch
         {
-            UpdateState.Available => "发现新版本 " + result.Version,
+            UpdateState.Available => result.Version is null ? "发现新版本" : "发现新版本 " + result.Version,
             UpdateState.Current => result.Message,
             _ => "检查更新失败"
         };
@@ -735,11 +797,8 @@ public sealed partial class MainWindow : Window
             catch (Exception ex) { previewError = ex.Message; }
             s = ReadControls();
             s.Save();
-            using (var key = Registry.CurrentUser.CreateSubKey(RunKey))
-            {
-                if (StartupToggle.IsOn) key.SetValue("Nocturne", $"\"{RendererPath}\"");
-                else key.DeleteValue("Nocturne", false);
-            }
+            if (StartupToggle.IsEnabled)
+                PresentStartupStatus(await AppDistribution.SetStartupAsync(StartupToggle.IsOn, RendererPath));
             StatusText.Text = "正在启动桌面效果…";
             await Task.Run(() =>
             {

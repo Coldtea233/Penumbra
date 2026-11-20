@@ -17,7 +17,8 @@ static void Pump(unsigned duration) {
         if(!DispatchWork(2)) std::abort();
     } while(GetTickCount64()<end);
 }
-constexpr unsigned FullTransitionWaitMs=(unsigned)focus_animation::Transition::DurationMs+50;
+constexpr double TestDurationMs=focus_animation::Transition::FullDurationMs(focus_animation::Speed::Balanced);
+constexpr unsigned FullTransitionWaitMs=static_cast<unsigned>(TestDurationMs)+50;
 static SIZE_T PrivateBytes() {
     PROCESS_MEMORY_COUNTERS_EX counters{};
     GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),sizeof(counters));
@@ -133,7 +134,7 @@ int main() {
         }
         if(Check(values[0]>.50&&values[0]<.75&&values[0]>2*(values[1]-values[0])&&values[1]-values[0]>1.5*(values[2]-values[1]),"real frames start fast and progressively decelerate")) return 1;
         std::printf("{\"Stage\":\"SubmittedEaseOut\",\"Showing\":%s,\"DurationMs\":%.0f,\"FirstSampleMs\":%.3f,\"FirstSampleAlpha\":%u,\"Progress100ms\":%.5f,\"Progress200ms\":%.5f,\"Progress300ms\":%.5f,\"Frames\":%llu,\"EndpointVelocity\":0,\"IdleTimer\":false}\n",
-            showing?"true":"false",focus_animation::Transition::DurationMs,elapsed,expectedAlpha,values[0],values[1],values[2],(unsigned long long)frameTrace.size());
+            showing?"true":"false",TestDurationMs,elapsed,expectedAlpha,values[0],values[1],values[2],(unsigned long long)frameTrace.size());
         traceAnimation=false;frameTrace.clear();
     }
     // Exercise the actual production wait/message dispatcher under a busy
