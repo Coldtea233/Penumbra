@@ -20,6 +20,8 @@
 #include <cstring>
 #include <cstdint>
 #include <memory>
+#include <atomic>
+#include <process.h>
 #include "focus_animation.h"
 #include "desktop_blur.h"
 #include "blur_bounds.h"
@@ -133,6 +135,22 @@ struct IconMask {
     }
 };
 IconMask iconMask;
+struct IconMaskCapture {
+    HWND window{};
+    RECT rect{};
+    DWORD owner=0;
+    std::atomic<bool> cancelled{false};
+    bool succeeded=false;
+    IconMask result;
+};
+using IconMaskReader=bool (*)(IconMaskCapture&);
+std::shared_ptr<IconMaskCapture> iconCapture;
+std::shared_ptr<IconMaskCapture> readyIconCapture;
+HANDLE iconCaptureThread{};
+ULONGLONG iconCaptureDeadline=0;
+HWND iconMaskWindow{};
+bool waitingForInitialIconMask=false;
+constexpr DWORD IconCaptureTimeoutMs=1500;
 // 设置窗口的预览需要同一份图标遮罩。遮罩放在命名共享内存里，
 // 只暴露每像素 1 位的掩码和它的屏幕矩形，不含任何屏幕图像；
 // 预览端只做采样，判定逻辑只有 icon_mask.h 这一份实现。
@@ -150,6 +168,7 @@ static_assert(offsetof(IconMaskShare,generation)==32,"icon mask generation offse
 HANDLE iconMaskMapping{};
 void* iconMaskView{};
 size_t iconMaskCapacity=0;
+const wchar_t* iconMaskShareName=L"Local\\Nocturne.IconMask.v1";
 std::wstring configDir, configFile;
 
 void TraceFrame(double value) {
@@ -303,28 +322,46 @@ bool LocateDesktop() {
 // 图标单元格：新版 Explorer 的图标视图在同一张表面里既画壁纸又画图标，
 // 只能在 Shell 报告的单元格内部区分内容，所以先向 Explorer 取一次布局。
 // 布局取不到时遮罩为空：暗角照常绘制，图标随之变暗，而不是拒绝整块效果。
-bool ReadIconCells(std::vector<icon_mask::Cell>& cells) {
+bool ReadIconCells(const IconMaskCapture& capture,std::vector<icon_mask::Cell>& cells) {
     cells.clear();
-    if(!iconList || !IsWindowVisible(iconList)) return false;
-    DWORD pid=0; GetWindowThreadProcessId(iconList,&pid);
-    HANDLE process=OpenProcess(PROCESS_VM_OPERATION|PROCESS_VM_READ|PROCESS_VM_WRITE|PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
-    if(!process) return false;
-    // 共享缓冲同时放 RECT 请求和 LVITEM（含标签文字），一次分配复用。
-    void* remote=VirtualAllocEx(process,nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
-    if(!remote) { CloseHandle(process); return false; }
-    DWORD_PTR count=0;
-    bool ok=SendMessageTimeoutW(iconList,LVM_GETITEMCOUNT,0,0,SMTO_ABORTIFHUNG,200,&count)!=0 && count<=4096;
+    const HWND window=capture.window;
+    const auto canQuery=[&] {
+        DWORD pid=0;
+        return !capture.cancelled.load()&&GetWindowThreadProcessId(window,&pid)&&
+            pid==capture.owner&&!IsHungAppWindow(window);
+    };
+    if(!canQuery()) return false;
+    // Only the worker waits for Explorer. Keep the remote buffer alive until
+    // each pointer-bearing ListView message actually returns.
+    SetLastError(ERROR_SUCCESS);
+    const auto count=SendMessageW(window,LVM_GETITEMCOUNT,0,0);
+    if(count<0||count>4096||GetLastError()==ERROR_ACCESS_DENIED||!canQuery()) return false;
+    if(count==0) return true;
+    struct RemoteBuffer {
+        HANDLE process{};
+        void* address{};
+        ~RemoteBuffer() {
+            if(address) VirtualFreeEx(process,address,0,MEM_RELEASE);
+            if(process) CloseHandle(process);
+        }
+    } buffer;
+    buffer.process=OpenProcess(PROCESS_VM_OPERATION|PROCESS_VM_READ|PROCESS_VM_WRITE,FALSE,capture.owner);
+    if(!buffer.process) return false;
+    buffer.address=VirtualAllocEx(buffer.process,nullptr,4096,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
+    if(!buffer.address) return false;
+    const HANDLE process=buffer.process;
+    void* const remote=buffer.address;
     // 图标索引与标签文字一次取回：字形回退需要它们，正常路径不用也不额外通信。
-    const auto QueryItem=[&](DWORD_PTR index,icon_mask::Cell& cell) {
+    const auto QueryItem=[&](int index,icon_mask::Cell& cell) {
+        if(!canQuery()) return false;
         constexpr int TextCapacity=128;
         LVITEMW item{};
         item.mask=LVIF_IMAGE|LVIF_TEXT;
-        item.iItem=static_cast<int>(index);
+        item.iItem=index;
         item.cchTextMax=TextCapacity;
         item.pszText=reinterpret_cast<LPWSTR>(static_cast<char*>(remote)+sizeof(LVITEMW));
         if(!WriteProcessMemory(process,remote,&item,sizeof(item),nullptr)) return false;
-        DWORD_PTR answered=0;
-        if(!SendMessageTimeoutW(iconList,LVM_GETITEMW,0,reinterpret_cast<LPARAM>(remote),SMTO_ABORTIFHUNG,200,&answered)||!answered) return false;
+        if(!SendMessageW(window,LVM_GETITEMW,0,reinterpret_cast<LPARAM>(remote))||!canQuery()) return false;
         LVITEMW answer{};
         if(!ReadProcessMemory(process,remote,&answer,sizeof(answer),nullptr)) return false;
         cell.image=answer.iImage;
@@ -332,31 +369,27 @@ bool ReadIconCells(std::vector<icon_mask::Cell>& cells) {
         if(ReadProcessMemory(process,item.pszText,text,sizeof(text)-sizeof(wchar_t),nullptr)) cell.text.assign(text);
         return true;
     };
-    const auto Query=[&](DWORD_PTR index,int code,RECT& answer) {
+    const auto Query=[&](int index,int code,RECT& answer) {
+        if(!canQuery()) return false;
         RECT request{code,0,0,0};
         if(!WriteProcessMemory(process,remote,&request,sizeof(request),nullptr)) return false;
-        DWORD_PTR answered=0;
-        if(!SendMessageTimeoutW(iconList,LVM_GETITEMRECT,static_cast<WPARAM>(index),
-            reinterpret_cast<LPARAM>(remote),SMTO_ABORTIFHUNG,120,&answered)||!answered) return false;
+        if(!SendMessageW(window,LVM_GETITEMRECT,static_cast<WPARAM>(index),
+            reinterpret_cast<LPARAM>(remote))||!canQuery()) return false;
         return ReadProcessMemory(process,remote,&answer,sizeof(answer),nullptr)!=FALSE;
     };
-    // Explorer 卡顿时不能拖住消息循环：整批查询有上限，超时按“读不到布局”处理，
-    // 让所有图标一致地失去保护，而不是随机一半亮一半暗。
-    const double deadline=ClockMs()+600;
     bool complete=true;
-    for(DWORD_PTR index=0;ok && index<count;++index) {
+    for(int index=0;index<count;++index) {
         icon_mask::Cell cell;
         if(!Query(index,LVIR_BOUNDS,cell.bounds)) { complete=false; break; }
         if(cell.bounds.right>cell.bounds.left && cell.bounds.bottom>cell.bounds.top) {
             if(!Query(index,LVIR_LABEL,cell.label)) cell.label={};
-            if(ClockMs()<=deadline) QueryItem(index,cell);
+            QueryItem(index,cell);
             cells.push_back(std::move(cell));
         }
-        if(ClockMs()>deadline) { complete=false; break; }
+        if(!canQuery()) { complete=false; break; }
     }
-    VirtualFreeEx(process,remote,0,MEM_RELEASE); CloseHandle(process);
-    if(!ok || !complete) cells.clear();
-    return ok && complete;
+    if(!complete) cells.clear();
+    return complete;
 }
 void ReleaseIconMaskShare() {
     if(iconMaskView) { UnmapViewOfFile(iconMaskView); iconMaskView=nullptr; }
@@ -372,7 +405,7 @@ bool PublishIconMask(const IconMask& mask) {
         ReleaseIconMaskShare();
         const ULONGLONG size=static_cast<ULONGLONG>(total);
         HANDLE mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,
-            static_cast<DWORD>(size>>32),static_cast<DWORD>(size),L"Local\\Nocturne.IconMask.v1");
+            static_cast<DWORD>(size>>32),static_cast<DWORD>(size),iconMaskShareName);
         if(!mapping) return false;
         void* view=MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,total);
         if(!view) { CloseHandle(mapping); return false; }
@@ -392,32 +425,67 @@ bool PublishIconMask(const IconMask& mask) {
     header->magic=IconMaskMagic;
     return true;
 }
-void ReadIconMask(IconMask& mask) {
-    mask.bits.clear(); mask.width=0; mask.height=0; mask.rect={}; iconMaskUnavailable=false;
-    if(!iconList || !IsWindowVisible(iconList)) { PublishIconMask(mask); return; } // 没有图标视图就不需要保护
-    const auto useEmptyMask=[&] { iconMaskUnavailable=true; PublishIconMask(mask); };
+bool ReadIconCaptureRect(HWND window,RECT& rect) {
     RECT client{};
     POINT origin{};
-    if(!GetClientRect(iconList,&client) || !ClientToScreen(iconList,&origin)) { useEmptyMask(); return; }
-    mask.rect={origin.x,origin.y,origin.x+client.right,origin.y+client.bottom};
-    mask.width=client.right; mask.height=client.bottom;
+    if(!window||!IsWindowVisible(window)||!GetClientRect(window,&client)||!ClientToScreen(window,&origin)) return false;
+    rect={origin.x,origin.y,origin.x+client.right,origin.y+client.bottom};
+    return true;
+}
+bool ReadIconMask(IconMaskCapture& job) {
+    auto& mask=job.result;
+    mask.rect=job.rect;
+    mask.width=job.rect.right-job.rect.left;
+    mask.height=job.rect.bottom-job.rect.top;
     const size_t count=static_cast<size_t>(mask.width)*mask.height;
-    if(mask.width<1 || mask.height<1 || count>160000000) { useEmptyMask(); return; }
+    // At most one outstanding screenshot, capped at 128 MiB even if Explorer stalls.
+    if(mask.width<1||mask.height<1||count>32u*1024u*1024u) return false;
     std::vector<icon_mask::Cell> cells;
-    const bool layout=ReadIconCells(cells);
-    // 布局读到却没有单元格：桌面本来就没有图标，不需要保护，也不必提示。
-    if(!layout) { useEmptyMask(); return; }
-    if(cells.empty()) { PublishIconMask(mask); return; }
+    if(!ReadIconCells(job,cells)||job.cancelled.load()) return false;
+    if(cells.empty()) return true;
     // 客户端区对齐到位图左上角；单元格与截图使用同一坐标系。
     Bitmap capture;
-    if(!capture.Create(mask.width,mask.height)) { useEmptyMask(); return; }
+    if(!capture.Create(mask.width,mask.height)) return false;
     ZeroMemory(capture.pixels,count*sizeof(uint32_t));
-    if(!PrintWindow(iconList,capture.dc,3)) { useEmptyMask(); return; }
+    if(job.cancelled.load()||!PrintWindow(job.window,capture.dc,3)||job.cancelled.load()) return false;
     std::vector<size_t> unresolved;
     icon_mask::Segment(mask.bits,mask.width,mask.height,capture.pixels,cells,&unresolved);
     icon_glyph::Resolve(mask.bits,mask.width,mask.height,capture.pixels,cells,unresolved,
-        static_cast<int>(GetDpiForWindow(iconList)));
-    PublishIconMask(mask);
+        static_cast<int>(GetDpiForWindow(job.window)));
+    return !job.cancelled.load();
+}
+struct IconCaptureWork {
+    std::shared_ptr<IconMaskCapture> job;
+    IconMaskReader read;
+};
+unsigned __stdcall RunIconCapture(void* context) {
+    std::unique_ptr<IconCaptureWork> work(static_cast<IconCaptureWork*>(context));
+    const HRESULT com=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
+    try { work->job->succeeded=work->read(*work->job); }
+    catch(...) { work->job->succeeded=false; }
+    if(SUCCEEDED(com)) CoUninitialize();
+    return 0;
+}
+void CancelIconCapture() {
+    if(iconCapture) iconCapture->cancelled.store(true);
+    iconCaptureDeadline=0;
+    readyIconCapture.reset();
+    waitingForInitialIconMask=false;
+}
+bool StartIconCapture(IconMaskReader read=ReadIconMask) {
+    if(iconCaptureThread) return false;
+    try {
+        auto job=std::make_shared<IconMaskCapture>();
+        job->window=iconList;
+        if(!ReadIconCaptureRect(job->window,job->rect)||!GetWindowThreadProcessId(job->window,&job->owner)) return false;
+        auto* work=new IconCaptureWork{job,read};
+        const auto thread=_beginthreadex(nullptr,0,RunIconCapture,work,0,nullptr);
+        if(!thread) { delete work; return false; }
+        iconCaptureThread=reinterpret_cast<HANDLE>(thread);
+        iconCapture=std::move(job);
+        iconCaptureDeadline=GetTickCount64()+IconCaptureTimeoutMs;
+        return true;
+    } catch(const std::bad_alloc&) { return false; }
 }
 void DropSurface(Surface& s) {
     if(IsWindow(s.hwnd)) DestroyWindow(s.hwnd);
@@ -869,7 +937,7 @@ void AdvanceAnimation() {
             else if(!RenderAnimation(s,1)||!PositionSurface(s,true)) { FailTransition(); return; }
         }
         StopAnimation();
-        if(iconsDirty&&visible&&controller) SetTimer(controller,5,120,nullptr);
+        if((readyIconCapture||(iconsDirty&&visible))&&controller) SetTimer(controller,5,120,nullptr);
         lastSubmitMs=ClockMs()-submittedAt;
         TraceFrame(visible?1:0); FlushFrameTrace();
         return;
@@ -890,7 +958,7 @@ void AdvanceAnimation() {
     if(!SetWaitableTimer(animationTick,&due,0,nullptr,nullptr,FALSE)) FailTransition();
 }
 void SetVisibility(bool visible,bool animate=true) {
-    if(paused||params.opacity==0) visible=false;
+    if(paused||params.opacity==0||waitingForInitialIconMask) visible=false;
     double now=ClockMs();
     if(!animate||params.opacity==0||params.animationDurationMs==0) {
         if(visible==transition.Target()&&!transition.Running(now)) return;
@@ -952,15 +1020,67 @@ void UpdateWindowState() {
 void QueueOnce(UINT message,bool& pending) {
     if(!pending) pending=PostMessageW(controller,message,0,0)!=FALSE;
 }
+void ResumeVignetteAfterIconCapture() {
+    if(!waitingForInitialIconMask) return;
+    waitingForInitialIconMask=false;
+    SetVisibility(params.opacity>0&&(!params.focusOnly||HasApplicationWindow()),params.focusOnly);
+}
+void ApplyCapturedIcons() {
+    if(!readyIconCapture||animationTimerArmed) return;
+    auto capture=std::move(readyIconCapture);
+    RECT current{};
+    DWORD owner=0;
+    if(paused||params.darkenIcons||iconList!=capture->window||
+       !GetWindowThreadProcessId(iconList,&owner)||owner!=capture->owner||
+       !ReadIconCaptureRect(iconList,current)||!EqualRect(&current,&capture->rect)) {
+        ResumeVignetteAfterIconCapture();
+        return;
+    }
+    iconMaskUnavailable=false;
+    iconMaskWindow=capture->window;
+    auto& fresh=capture->result;
+    const bool changed=fresh.bits!=iconMask.bits||!EqualRect(&fresh.rect,&iconMask.rect);
+    iconMask=std::move(fresh);
+    PublishIconMask(iconMask);
+    if(changed&&params.opacity>0) {
+        const BYTE opacity=transition.Target()?255:0;
+        for(auto& s:surfaces) if(!Render(s,opacity)) { FailTransition(); break; }
+    }
+    ResumeVignetteAfterIconCapture();
+}
+void FinishIconCapture() {
+    CloseHandle(iconCaptureThread);
+    iconCaptureThread=nullptr;
+    auto capture=std::move(iconCapture);
+    if(!capture->cancelled.load()) {
+        const bool usable=capture->succeeded&&GetTickCount64()<=iconCaptureDeadline;
+        if(usable) {
+            readyIconCapture=std::move(capture);
+            ApplyCapturedIcons();
+        } else {
+            iconMaskUnavailable=!iconMaskWindow;
+            ResumeVignetteAfterIconCapture();
+        }
+    }
+    iconCaptureDeadline=0;
+    if(iconsDirty&&!paused&&!params.darkenIcons&&controller) SetTimer(controller,5,350,nullptr);
+}
 bool Rebuild() {
+    CancelIconCapture();
     Clear(); transition.Reset(false);
     blurPolicyAllowed=desktop_blur::TransparencyAllowed();
     if(paused) { Status(L"桌面效果已暂停 · 可从托盘恢复"); return true; }
     if(!LocateDesktop()) { Status(L"未找到桌面宿主 · 已安全隐藏，将自动重试"); return false; }
-    IconMask fresh;
-    if(!params.darkenIcons) ReadIconMask(fresh);
-    else PublishIconMask(fresh);
-    iconMask=std::move(fresh); iconsDirty=false;
+    RECT iconRect{};
+    const bool protectIcons=!params.darkenIcons&&params.opacity>0&&ReadIconCaptureRect(iconList,iconRect);
+    if(!protectIcons||iconMaskWindow!=iconList||!EqualRect(&iconMask.rect,&iconRect)) {
+        iconMask={};
+        iconMaskWindow=nullptr;
+        PublishIconMask(iconMask);
+    }
+    iconsDirty=protectIcons&&!StartIconCapture();
+    waitingForInitialIconMask=protectIcons&&!iconMaskWindow&&!iconsDirty;
+    iconMaskUnavailable=protectIcons&&!iconMaskWindow&&iconsDirty;
     frameIntervalMs=1000.0/60;
     detectedRefreshHz=0;
     std::vector<RECT> monitors; EnumDisplayMonitors(nullptr,nullptr,CollectMonitor,reinterpret_cast<LPARAM>(&monitors));
@@ -972,7 +1092,7 @@ bool Rebuild() {
     // Prewarm at apply/startup even when the desktop currently has focus. A
     // later fully-hidden -> app transition has exactly the same path as a reversal.
     if(params.opacity>0) for(auto& s:surfaces) if(!Render(s,0)) { FailTransition(); return false; }
-    bool visible=params.opacity>0&&(!params.focusOnly||HasApplicationWindow());
+    bool visible=!waitingForInitialIconMask&&params.opacity>0&&(!params.focusOnly||HasApplicationWindow());
     TraceWindowState("rebuild");
     SetVisibility(visible,params.focusOnly);
     if(!transition.Target()&&visible) return false;
@@ -1189,13 +1309,15 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         else if(wp==5) {
             KillTimer(hwnd,5);
             if(animationTimerArmed) { SetTimer(hwnd,5,120,nullptr); return 0; }
-            if(!paused&&(transition.Target()||animationTimerArmed)) {
-                IconMask fresh;
-                ReadIconMask(fresh);
+            ApplyCapturedIcons();
+            if(iconsDirty&&!paused&&!params.darkenIcons&&params.opacity>0&&!iconCaptureThread) {
                 iconsDirty=false;
-                if(fresh.bits!=iconMask.bits || !EqualRect(&fresh.rect,&iconMask.rect)) {
-                    iconMask=std::move(fresh);
-                    for(auto& s:surfaces) if(!Render(s)) { FailTransition(); break; }
+                if(!StartIconCapture()&&!IsWindowVisible(iconList)) {
+                    iconMask={};
+                    iconMaskWindow=nullptr;
+                    PublishIconMask(iconMask);
+                    const BYTE opacity=transition.Target()?255:0;
+                    for(auto& s:surfaces) if(!Render(s,opacity)) { FailTransition(); break; }
                 }
             }
         }
@@ -1300,7 +1422,7 @@ int SelfTest() {
     return 0;
 }
 bool DispatchWork(DWORD timeout=INFINITE) {
-    HANDLE events[8]{stopEvent,reloadEvent};
+    HANDLE events[9]{stopEvent,reloadEvent};
     DWORD count=2,darkIndex=MAXDWORD,blurIndex=MAXDWORD,previewIndex=MAXDWORD,colorIndex=MAXDWORD,colorPreviewIndex=MAXDWORD,wallpaperIndex=MAXDWORD;
     if(animationTimerArmed) { darkIndex=count; events[count++]=animationTick; }
     if(blurTimerArmed) { blurIndex=count; events[count++]=blurAnimationTick; }
@@ -1308,6 +1430,13 @@ bool DispatchWork(DWORD timeout=INFINITE) {
     if(colorTimerArmed) { colorIndex=count;events[count++]=colorAnimationTick; }
     if(colorPreviewProcess) { colorPreviewIndex=count;events[count++]=colorPreviewProcess; }
     if(wallpaperProcess) { wallpaperIndex=count;events[count++]=wallpaperProcess; }
+    const DWORD iconIndex=iconCaptureThread?count:MAXDWORD;
+    if(iconCaptureThread) events[count++]=iconCaptureThread;
+    if(iconCaptureDeadline) {
+        const ULONGLONG now=GetTickCount64();
+        const DWORD remaining=now<iconCaptureDeadline?static_cast<DWORD>(iconCaptureDeadline-now):0;
+        timeout=std::min(timeout,remaining);
+    }
     DWORD wait=MsgWaitForMultipleObjectsEx(count,events,timeout,QS_ALLINPUT,MWMO_INPUTAVAILABLE);
     if(wait==WAIT_OBJECT_0||wait==WAIT_FAILED) return false;
     if(wait==WAIT_OBJECT_0+1) { paused=false; Load(); Rebuild(); }
@@ -1317,12 +1446,19 @@ bool DispatchWork(DWORD timeout=INFINITE) {
     if(colorIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorIndex) AdvanceColorAnimation();
     if(colorPreviewIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorPreviewIndex) EndSaturationPreview();
     if(wallpaperIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+wallpaperIndex) ClearColor();
+    if(iconIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+iconIndex) FinishIconCapture();
     if(wait==WAIT_OBJECT_0+count) {
         MSG msg; unsigned messages=0;
         while(messages++<32&&PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
             if(msg.message==WM_QUIT) return false;
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
+    }
+    if(iconCaptureDeadline&&GetTickCount64()>=iconCaptureDeadline) {
+        iconCapture->cancelled.store(true);
+        iconCaptureDeadline=0;
+        iconMaskUnavailable=!iconMaskWindow;
+        ResumeVignetteAfterIconCapture();
     }
     return true;
 }
@@ -1393,6 +1529,9 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     if(moveSizeHook) UnhookWinEvent(moveSizeHook);
     if(reorderHook) UnhookWinEvent(reorderHook);
     if(iconHook) UnhookWinEvent(iconHook);
+    CancelIconCapture();
+    // A stalled Explorer may still be painting. Quit without joining the worker.
+    if(iconCaptureThread) CloseHandle(iconCaptureThread);
     Clear(); ReleaseIconMaskShare(); blurEngine.reset(); trayIcon.Reset();
     DestroyWindow(controller); CloseHandle(stopEvent); CloseHandle(reloadEvent); CloseHandle(appliedEvent); CloseHandle(mutex); return 0;
 }

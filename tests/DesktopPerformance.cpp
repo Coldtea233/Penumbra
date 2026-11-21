@@ -30,13 +30,18 @@ int main() {
     instance=GetModuleHandleW(nullptr);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     InitializePaths(); Load(); params.focusOnly=true;
-    if(!LocateDesktop()||(!params.darkenIcons&&!ReadIconMask(iconMask))) return 1;
+    if(!LocateDesktop()) return 1;
     stopEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr); reloadEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);
     WNDCLASSW wc{}; wc.hInstance=instance; wc.lpfnWndProc=SurfaceProc; wc.lpszClassName=L"Nocturne.Surface"; RegisterClassW(&wc);
     wc.lpfnWndProc=ControllerProc; wc.lpszClassName=L"Nocturne.Controller"; RegisterClassW(&wc);
     controller=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE,wc.lpszClassName,L"Penumbra benchmark",WS_POPUP,0,0,0,0,nullptr,nullptr,instance,nullptr);
     std::vector<RECT> monitors; EnumDisplayMonitors(nullptr,nullptr,CollectMonitor,reinterpret_cast<LPARAM>(&monitors));
     for(const RECT& r:monitors) { Surface s; s.rect=r; surfaces.push_back(std::move(s)); }
+    if(!params.darkenIcons&&StartIconCapture()) {
+        const double deadline=ClockMs()+IconCaptureTimeoutMs;
+        while(iconCaptureThread&&ClockMs()<deadline) if(!DispatchWork(10)) return 1;
+        if(iconCaptureThread) CancelIconCapture();
+    }
     double start=ClockMs(),cpu=CpuMs();
     for(auto& s:surfaces) if(!Render(s,0)) return 2;
     Result("PrepareOnce",ClockMs()-start,CpuMs()-cpu);
