@@ -2,7 +2,7 @@
   <img src="assets/branding/AppIcon.png" width=130 />
 <h1>Penumbra<br />沉浸式桌面</h1>
 
-**为你的桌面添加暗角与模糊，把专注交给前台窗口**
+**为桌面添加暗角与虚化，把专注交给前台窗口**
 <div>
   <img src="https://github.com/user-attachments/assets/fa8d5b00-ac71-4e28-a2b2-a290efa95ec7" width=600/>
 </div>
@@ -13,13 +13,13 @@
 <div align=left>
 
 - **优秀的性能**：约30MB内存占用 0.02% CPU占用
-- **仅在必要时生效**：仅在前台存在窗口时启用 暗角/模糊 效果（可开关）
-- **非线性动画**：暗角与模糊共用缓出曲线，快速、均衡、优雅默认分别为 520、800、1200 毫秒，可在高级设置中调整。
-- **原生UI**：设置界面采用Windows原生WinUI3设计语言
+- **选择性生效** 前台无窗口时禁用 暗角/模糊/饱和度 效果（可开关）
+- **非线性动画**：淡入淡出动画使用可调节速率的缓出曲线
+- **原生UI**：配置界面采用Windows原生WinUI3设计语言
 
 ## 效果预览
 
-大家可以使用我的参数喵，模糊半径3px，饱和度60%，四个暗角参数依次为60、50、100、100喵
+这里是我的参数喵，模糊半径3px，饱和度60%，四个暗角参数依次为60、50、100、100
 <p align="center">
   <img width="2880" height="1620" alt="image" src="https://github.com/user-attachments/assets/6636dff0-8c32-4dd5-a07a-c3026a6b61ca" />
 
