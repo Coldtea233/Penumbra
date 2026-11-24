@@ -10,6 +10,7 @@
 
 **[下载最新版 ↗](https://github.com/Coldtea233/Penumbra/releases)  ·  [反馈问题](https://github.com/Coldtea233/Penumbra/issues)**
 
+<i><sub>Penumbra：n.（天文/光学）半影；边缘，模糊地带</sub></i>
 <div align=left>
 
 - **优秀的性能**：约30MB内存占用 0.02% CPU占用
@@ -17,7 +18,6 @@
 - **非线性动画**：淡入淡出动画使用可调节速率的缓出曲线
 - **原生UI**：配置界面采用Windows原生WinUI3设计语言
 
-<i><sub>Penumbra：n.（天文/光学）半影；边缘，模糊地带</sub></i>
 ## 效果预览
 
 这里是我的参数喵，模糊半径3px，饱和度60%，四个暗角参数依次为60、50、100、100
