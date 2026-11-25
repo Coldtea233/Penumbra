@@ -1,5 +1,5 @@
 #pragma once
-// Native Windows Composition: no Win2D, managed helper, frame capture or CPU blur.
+// Native Windows Composition for the live effect and retained snapshot brushes.
 // The small ABI additions below match Microsoft's Windows SDK WinRT headers.
 #include <roapi.h>
 #include <winstring.h>
@@ -10,6 +10,8 @@
 #endif
 #include <dispatcherqueue.h>
 #include <windows.ui.composition.h>
+#include <windows.ui.composition.interop.h>
+#include <d2d1_1.h>
 #include <windows.graphics.effects.h>
 #include <wrl/client.h>
 #include <atomic>
@@ -46,6 +48,11 @@ struct KeyFrameAnimation : IInspectable {
 struct DesktopInterop : IUnknown {
     virtual HRESULT STDMETHODCALLTYPE CreateDesktopWindowTarget(HWND,BOOL,IInspectable**) = 0;
 };
+// The MinGW interop header omits the drawing-surface ABI.
+struct DrawingSurfaceInterop : IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE BeginDraw(const RECT*,REFIID,void**,POINT*) = 0;
+    virtual HRESULT STDMETHODCALLTYPE EndDraw() = 0;
+};
 struct SourceFactory : IInspectable {
     virtual HRESULT STDMETHODCALLTYPE Create(HSTRING,IInspectable**) = 0;
 };
@@ -61,6 +68,7 @@ struct EffectInterop : IUnknown {
 __CRT_UUID_DECL(desktop_blur::Compositor2,0x735081dc,0x5e24,0x45da,0xa3,0x8f,0xe3,0x2c,0xc3,0x49,0xa9,0xa0)
 __CRT_UUID_DECL(desktop_blur::KeyFrameAnimation,0x126e7f22,0x3ae9,0x4540,0x9a,0x8a,0xde,0xae,0x8a,0x4a,0x4a,0x84)
 __CRT_UUID_DECL(desktop_blur::DesktopInterop,0x29e691fa,0x4567,0x4dca,0xb3,0x19,0xd0,0xf2,0x07,0xeb,0x68,0x07)
+__CRT_UUID_DECL(desktop_blur::DrawingSurfaceInterop,0xfd04e6e3,0xfe0c,0x4c3c,0xab,0x19,0xa0,0x76,0x01,0xa5,0x76,0xee)
 __CRT_UUID_DECL(desktop_blur::SourceFactory,0xb3d9f276,0xaba3,0x4724,0xac,0xf3,0xd0,0x39,0x74,0x64,0xdb,0x1c)
 __CRT_UUID_DECL(desktop_blur::EffectInterop,0x2fc57384,0xa068,0x44d7,0xa3,0x31,0x30,0x98,0x2f,0xcf,0x71,0x77)
 namespace desktop_blur {
@@ -274,13 +282,15 @@ public:
         ComPtr<C::ICompositionEffectBrush> effect;
         ComPtr<C::ICompositionPropertySet> properties;
         ComPtr<C::IInsetClip> clip;
+        ComPtr<C::ICompositionBrush> frozen;
+        ComPtr<C::ICompositionBrush> colorInput;
         float radius=-1;
         Filter filter=Filter::Gaussian;
-        bool samplingEnabled=true,brushAttached=false;
+        bool samplingEnabled=true,brushAttached=false,frozenAttached=false;
         void Reset() {
             if(target) target->put_Root(nullptr);
-            properties.Reset(); clip.Reset(); effect.Reset(); visual.Reset(); target.Reset(); radius=-1;
-            samplingEnabled=true;brushAttached=false;
+            properties.Reset(); clip.Reset(); effect.Reset(); frozen.Reset(); colorInput.Reset(); visual.Reset(); target.Reset(); radius=-1;
+            samplingEnabled=true;brushAttached=false;frozenAttached=false;
             if(IsWindow(hwnd)) DestroyWindow(hwnd);
             hwnd=nullptr;
         }
@@ -358,20 +368,71 @@ public:
         if(FAILED(hr)) surface.samplingEnabled=previous;
         return hr;
     }
+    HRESULT SetColorInput(Surface& surface,ComPtr<C::ICompositionBrush> texture) {
+        if(surface.colorInput.Get()==texture.Get()) return S_OK;
+        const HRESULT hr=surface.effect->SetSourceParameter(String(L"Backdrop"),texture?texture.Get():backdrop.Get());
+        if(SUCCEEDED(hr)) surface.colorInput=std::move(texture);
+        return hr;
+    }
+    HRESULT SnapshotDevice(ID2D1Device* device,ComPtr<C::ICompositionGraphicsDevice>& graphics) {
+        ComPtr<C::ICompositorInterop> graphicsInterop;
+        HRESULT hr=compositor.As(&graphicsInterop);
+        return FAILED(hr)?hr:graphicsInterop->CreateGraphicsDevice(device,&graphics);
+    }
+    HRESULT UpdateSnapshot(C::ICompositionDrawingSurface* surface,ID2D1Bitmap1* bitmap) {
+        ComPtr<DrawingSurfaceInterop> drawing;
+        HRESULT hr=surface->QueryInterface(IID_PPV_ARGS(&drawing));
+        if(FAILED(hr)) return hr;
+        const auto size=bitmap->GetSize();
+        ComPtr<ID2D1DeviceContext> context;
+        POINT offset{};
+        if(FAILED(hr=drawing->BeginDraw(nullptr,IID_PPV_ARGS(&context),&offset))) return hr;
+        context->SetDpi(96,96);
+        const auto dest=D2D1::RectF(offset.x,offset.y,offset.x+size.width,offset.y+size.height);
+        context->DrawBitmap(bitmap,&dest,1,D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR,nullptr,nullptr);
+        return drawing->EndDraw();
+    }
+    HRESULT SnapshotBrush(C::ICompositionGraphicsDevice* graphics,ID2D1Bitmap1* bitmap,ComPtr<C::ICompositionBrush>& brush,
+        ComPtr<C::ICompositionDrawingSurface>* retained=nullptr) {
+        const auto size=bitmap->GetSize();
+        namespace DX=ABI::Windows::Graphics::DirectX;
+        ComPtr<C::ICompositionDrawingSurface> surface;
+        HRESULT hr;
+        if(FAILED(hr=graphics->CreateDrawingSurface({size.width,size.height},DX::DirectXPixelFormat_B8G8R8A8UIntNormalized,
+            DX::DirectXAlphaMode_Premultiplied,&surface))||FAILED(hr=UpdateSnapshot(surface.Get(),bitmap))) return hr;
+        ComPtr<C::ICompositionSurface> content;
+        ComPtr<C::ICompositionSurfaceBrush> texture;
+        if(FAILED(hr=surface.As(&content))||FAILED(hr=compositor->CreateSurfaceBrushWithSurface(content.Get(),&texture))||
+           FAILED(hr=texture->put_Stretch(C::CompositionStretch_Fill))) return hr;
+        hr=texture.As(&brush);
+        if(SUCCEEDED(hr)&&retained) *retained=std::move(surface);
+        return hr;
+    }
+    HRESULT SetFrozenBrush(Surface& surface,ComPtr<C::ICompositionBrush> brush) {
+        if(!surface.frozen&&!brush) return S_OK;
+        auto old=std::move(surface.frozen);
+        surface.frozen=std::move(brush);
+        const HRESULT hr=UpdateBrush(surface);
+        if(FAILED(hr)) surface.frozen=std::move(old);
+        return hr;
+    }
 private:
     HRESULT UpdateBrush(Surface& surface) {
         bool active=surface.samplingEnabled&&(surface.filter==Filter::Gaussian?surface.radius>0:surface.radius<1);
-        if(active==surface.brushAttached) return S_OK;
+        const bool frozen=active&&surface.frozen;
+        const bool live=active&&!frozen;
+        if(live==surface.brushAttached&&frozen==surface.frozenAttached&&!frozen) return S_OK;
         ComPtr<C::ISpriteVisual> sprite;
         HRESULT hr=surface.visual.As(&sprite);
         if(FAILED(hr)) return hr;
         ComPtr<C::ICompositionBrush> brush;
-        if(active&&FAILED(hr=surface.effect.As(&brush))) return hr;
+        if(frozen) brush=surface.frozen;
+        if(live&&FAILED(hr=surface.effect.As(&brush))) return hr;
         // Detach the render graph, not just its opacity or HWND visibility.
         // Cached objects/radius survive so restoring the live desktop costs no
         // screenshot, GPU readback, texture allocation, or animation reset.
         hr=sprite->put_Brush(brush.Get());
-        if(SUCCEEDED(hr)) surface.brushAttached=active;
+        if(SUCCEEDED(hr)) { surface.brushAttached=live; surface.frozenAttached=frozen; }
         return hr;
     }
 public:

@@ -8,7 +8,7 @@ $testNames=@('IconCaptureResponsivenessTests','DesktopLayeringTests','RendererTe
 if($InstallerOnly){$testNames=@('InstallerTests')}
 if($WindowEvents){$testNames+=@('WindowPresenceTests','WindowQueryTests')}
 if($VisualProbe){$testNames+='LayeredOpacityTests'}
-if($Blur){$testNames+=@('RenderBudgetTests','BatchRenderBudgetTests','RenderBudgetEventsTests','EffectSamplingTests','TaskbarBoundsTests','BlurStateTests','BlurIconProtectionTests','BlurGeometryTests','BlurProbe')}
+if($Blur){$testNames+=@('RenderBudgetTests','BatchRenderBudgetTests','RenderBudgetEventsTests','EffectSamplingTests','TaskbarBoundsTests','BlurStateTests','BlurIconProtectionTests','BlurGeometryTests','BlurProbe','BlurSnapshotTests')}
 if($Saturation){$testNames+=@('SaturationStateTests','SaturationProbe')}
 if($Branding){
     if(!$BrandingExecutable){throw 'Pass -BrandingExecutable with the built Nocturne.Renderer.exe.'}
@@ -18,7 +18,7 @@ if($Branding){
 foreach($testName in $testNames){
     $testExecutable=Join-Path $testDirectory "$testName.exe"
     [string[]]$entryOptions=if($testName -eq 'BrandingTests'){@('-municode')}else{@()}
-    & (Join-Path $Toolchain 'bin\x86_64-w64-mingw32-clang++.exe') (Join-Path $PSScriptRoot "$testName.cpp") -std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -static @entryOptions -luser32 -lgdi32 -lshell32 -lole32 -luuid -lpsapi -ldwmapi -lruntimeobject -lcoremessaging -ladvapi32 -lmsi -o $testExecutable
+    & (Join-Path $Toolchain 'bin\x86_64-w64-mingw32-clang++.exe') (Join-Path $PSScriptRoot "$testName.cpp") -std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -static @entryOptions -luser32 -lgdi32 -lshell32 -lole32 -luuid -lpsapi -ldwmapi -lruntimeobject -lcoremessaging -ladvapi32 -lmsi -ld3d11 -ld2d1 -ldxguid -o $testExecutable
     if($LASTEXITCODE){throw "Native test compilation failed: $testName"}
     if($testName -eq 'BrandingTests'){& $testExecutable $BrandingExecutable}else{& $testExecutable}
     if($LASTEXITCODE -eq 77){Write-Warning "Visual fixture unavailable: $testName was NOT verified.";continue}

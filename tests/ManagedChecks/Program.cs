@@ -105,9 +105,19 @@ Check(colorOriginal.SequenceEqual(colorSource), "saturation never mutates the so
 bool invalidColor = false;
 try { PreviewColor.Apply(colorSource, [], 25); } catch (ArgumentException) { invalidColor = true; }
 Check(invalidColor, "invalid icon mask rejected");
-Check(!defaults.BlurEnabled && defaults.BlurRadius == 12, "blur remains opt-in with compatible defaults");
-var changed = defaults with { BlurEnabled = true, BlurRadius = 32 };
-Check(changed.BlurEnabled && changed.BlurRadius == 32 && changed.Opacity == defaults.Opacity, "independent immutable blur settings");
+Check(!defaults.BlurEnabled && defaults.BlurRadius == 12 && defaults.BlurRenderRate == DesktopBlurRate.Hz30 &&
+    Settings.Parse([]).BlurRenderRate == DesktopBlurRate.Hz30, "fresh settings default to 30 Hz");
+foreach (var rate in Enum.GetValues<DesktopBlurRate>())
+{
+    var changed = defaults with { BlurEnabled = true, BlurRadius = 32, BlurRenderRate = rate };
+    Check(Settings.Parse(changed.Serialize().Split('\n')) == changed, "blur rate round-trips independently of other settings");
+}
+Check(Settings.Parse(["blurMode=0"]).BlurRenderRate == DesktopBlurRate.VSync, "legacy live Gaussian maps to vertical sync");
+Check(Settings.Parse(["blurMode=1"]).BlurRenderRate == DesktopBlurRate.Hz15, "legacy 8 FPS maps to the lowest fixed rate");
+Check(Settings.Parse(["blurMode=2"]).BlurRenderRate == DesktopBlurRate.Still, "legacy freeze mode maps to still");
+Check(Settings.Parse(["blurFreezeAfterFade=1"]).BlurRenderRate == DesktopBlurRate.Still, "original freeze flag maps to still");
+Check(Settings.Parse(["blurMode=2", "blurRenderRate=90"]).BlurRenderRate == DesktopBlurRate.Hz90, "explicit rate takes precedence over the legacy mode");
+Check(Settings.Parse(["blurRenderRate=121"]).BlurRenderRate == DesktopBlurRate.Hz30, "unsupported rates fall back to the default");
 byte[] uniform = new byte[23 * 9 * 4];
 for (int i = 0; i < uniform.Length; i += 4)
 { uniform[i] = 32; uniform[i + 1] = 64; uniform[i + 2] = 128; uniform[i + 3] = 255; }

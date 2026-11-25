@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 
 namespace Nocturne;
@@ -7,7 +8,10 @@ namespace Nocturne;
 internal enum UpdateState { Available, Current, Failed }
 internal sealed record UpdateResult(UpdateState State, string Message, string? Version = null, Uri? ReleasePage = null,
     UpdateAsset? Asset = null, bool StoreInstallAvailable = false);
-internal sealed record UpdateAsset(Uri Url, string Name, long Size, string Sha256);
+internal sealed record UpdateAsset(Uri Url, string Name, long? Size, string Sha256)
+{
+    internal const long MaximumBytes = 256L * 1024 * 1024;
+}
 
 // Runs only in the settings process, once at startup or on an explicit click.
 // No token or background timer. Installation requires explicit user action.
@@ -16,6 +20,8 @@ internal static class UpdateChecker
     internal const string Endpoint = "https://api.github.com/repos/Coldtea233/Penumbra/releases/latest";
     internal const string LatestPage = "https://github.com/Coldtea233/Penumbra/releases/latest";
     internal const int MaximumResponseBytes = 512 * 1024;
+    private const int MaximumChecksumBytes = 16 * 1024;
+    private const string InAppUpdateMessage = "发现新版本";
 
     internal static string DisplayVersion(string informationalVersion)
     {
@@ -105,7 +111,7 @@ internal static class UpdateChecker
                 return new(UpdateState.Failed, "无法识别 GitHub 发行版的版本号。");
             var result = Compare(current, latest, tag);
             if (result.State == UpdateState.Available && ReadInstaller(release, tag, latest) is { } installer)
-                return result with { Asset = installer, Message = "可在应用内下载并安装。安装前请保存参数。" };
+                return result with { Asset = installer, Message = InAppUpdateMessage };
             return result;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -135,25 +141,25 @@ internal static class UpdateChecker
     {
         if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array) return null;
         string name = $"Penumbra-v{version}-Setup-x64.exe";
-        var url = new Uri($"https://github.com/Coldtea233/Penumbra/releases/download/{Uri.EscapeDataString(tag)}/{name}");
         foreach (var asset in assets.EnumerateArray())
         {
             if (asset.ValueKind != JsonValueKind.Object || !asset.TryGetProperty("name", out var filename) ||
                 filename.ValueKind != JsonValueKind.String || filename.GetString() != name ||
                 !asset.TryGetProperty("state", out var state) || state.ValueKind != JsonValueKind.String || state.GetString() != "uploaded" ||
                 !asset.TryGetProperty("size", out var size) || size.ValueKind != JsonValueKind.Number ||
-                !size.TryGetInt64(out long length) || length < 1 || length > 256 * 1024 * 1024 ||
+                !size.TryGetInt64(out long length) || length < 1 || length > UpdateAsset.MaximumBytes ||
                 !asset.TryGetProperty("digest", out var digest) || digest.ValueKind != JsonValueKind.String) continue;
             string hash = digest.GetString()!;
             if (hash.Length == 71 && hash.StartsWith("sha256:", StringComparison.Ordinal) && hash[7..].All(Uri.IsHexDigit))
-                return new(url, name, length, hash[7..]);
+                return new(ReleaseAssetUrl(tag, name), name, length, hash[7..]);
         }
         return null;
     }
 
-    // Public GitHub latest-release redirect is a low-cost fallback when a
-    // shared IP exhausts the anonymous API quota. HEAD only: no HTML scraping,
-    // third-party mirror, token, installer download, or automatic redirect.
+    private static Uri ReleaseAssetUrl(string tag, string name) =>
+        new($"https://github.com/Coldtea233/Penumbra/releases/download/{Uri.EscapeDataString(tag)}/{name}");
+
+    // The public release link and checksum asset work without the Releases API quota.
     private static async Task<UpdateResult?> CheckReleaseLinkAsync(HttpClient client, Version current, CancellationToken token)
     {
         try
@@ -171,9 +177,45 @@ internal static class UpdateChecker
                 !page.AbsolutePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return null;
             string tag = Uri.UnescapeDataString(page.AbsolutePath[prefix.Length..]);
             if (tag.Length > 64 || tag != tag.Trim() || !TryVersion(tag, out var latest)) return null;
-            return Compare(current, latest, tag);
+            var result = Compare(current, latest, tag);
+            if (result.State != UpdateState.Available || tag != $"v{latest}") return result;
+
+            var installer = await ReadInstallerChecksumAsync(client, tag, token).ConfigureAwait(false);
+            return installer is null ? result : result with { Asset = installer, Message = InAppUpdateMessage };
         }
         catch (Exception error) when (error is HttpRequestException or IOException or OperationCanceledException or UriFormatException)
         { return null; }
+    }
+
+    private static async Task<UpdateAsset?> ReadInstallerChecksumAsync(HttpClient client, string tag, CancellationToken token)
+    {
+        string name = $"Penumbra-{tag}-Setup-x64.exe";
+        try
+        {
+            using var response = await UpdateDownload.GetReleaseAssetAsync(client,
+                ReleaseAssetUrl(tag, $"{tag}.SHA256SUMS.txt"), token).ConfigureAwait(false);
+            if (response.StatusCode != HttpStatusCode.OK ||
+                response.Content.Headers.ContentLength > MaximumChecksumBytes) return null;
+            using var body = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
+            byte[] bytes = new byte[MaximumChecksumBytes + 1];
+            int length = await body.ReadAtLeastAsync(bytes, bytes.Length, false, token).ConfigureAwait(false);
+            if (length > MaximumChecksumBytes) return null;
+
+            string? digest = null;
+            foreach (string line in Encoding.UTF8.GetString(bytes, 0, length).TrimStart('\uFEFF').Split('\n'))
+            {
+                string entry = line.Trim();
+                int separator = entry.IndexOfAny([' ', '\t']);
+                if (separator < 0 || entry[(separator + 1)..].TrimStart().TrimStart('*') != name) continue;
+                if (digest is not null || separator != 64 || !entry[..separator].All(Uri.IsHexDigit)) return null;
+                digest = entry[..separator];
+            }
+            return digest is null ? null : new(ReleaseAssetUrl(tag, name), name, null, digest);
+        }
+        catch (Exception error) when (error is HttpRequestException or IOException or InvalidDataException or OperationCanceledException or UriFormatException)
+        {
+            // Keep the manual release link when the checksum cannot be fetched or validated.
+            return null;
+        }
     }
 }

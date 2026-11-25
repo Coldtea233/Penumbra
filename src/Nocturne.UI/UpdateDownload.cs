@@ -16,10 +16,14 @@ internal static class UpdateDownload
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromMinutes(5));
         var cancellation = deadline.Token;
-        using var response = await GetAssetAsync(client, asset.Url, cancellation).ConfigureAwait(false);
+        using var response = await GetReleaseAssetAsync(client, asset.Url, cancellation).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
-        if (response.Content.Headers.ContentLength is long declared && declared != asset.Size)
+        long? declaredSize = response.Content.Headers.ContentLength;
+        if (declaredSize is < 1 or > UpdateAsset.MaximumBytes ||
+            (asset.Size.HasValue && declaredSize.HasValue && declaredSize != asset.Size))
             throw new InvalidDataException("安装包大小与发行信息不符。");
+        long? expectedSize = asset.Size ?? declaredSize;
+        long limit = expectedSize ?? UpdateAsset.MaximumBytes;
         var directory = Directory.CreateTempSubdirectory("Penumbra-update-");
         string path = Path.Combine(directory.FullName, asset.Name);
         bool keep = false;
@@ -35,13 +39,17 @@ internal static class UpdateDownload
             while ((count = await body.ReadAsync(buffer, cancellation).ConfigureAwait(false)) != 0)
             {
                 total += count;
-                if (total > asset.Size) throw new InvalidDataException("安装包超过发行信息中的大小。");
+                if (total > limit) throw new InvalidDataException("安装包超过下载大小限制。");
                 hash.AppendData(buffer, 0, count);
                 await file.WriteAsync(buffer.AsMemory(0, count), cancellation).ConfigureAwait(false);
-                int percent = (int)(100 * total / asset.Size);
-                if (percent != lastPercent) progress.Report(lastPercent = percent);
+                if (expectedSize is long size)
+                {
+                    int percent = (int)(100 * total / size);
+                    if (percent != lastPercent) progress.Report(lastPercent = percent);
+                }
             }
-            if (total != asset.Size || !string.Equals(Convert.ToHexString(hash.GetHashAndReset()), asset.Sha256, StringComparison.OrdinalIgnoreCase))
+            if (total == 0 || (expectedSize.HasValue && total != expectedSize) ||
+                !string.Equals(Convert.ToHexString(hash.GetHashAndReset()), asset.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("安装包 SHA-256 校验失败。");
             await file.FlushAsync(cancellation).ConfigureAwait(false);
             keep = true;
@@ -53,13 +61,13 @@ internal static class UpdateDownload
         }
     }
 
-    private static async Task<HttpResponseMessage> GetAssetAsync(HttpClient client, Uri url, CancellationToken token)
+    internal static async Task<HttpResponseMessage> GetReleaseAssetAsync(HttpClient client, Uri url, CancellationToken token)
     {
         for (int redirect = 0; redirect <= 3; redirect++)
         {
             if (url.Scheme != Uri.UriSchemeHttps || url.Port != 443 || url.UserInfo.Length != 0 ||
                 (redirect == 0 ? url.Host != "github.com" : url.Host is not ("release-assets.githubusercontent.com" or "objects.githubusercontent.com")))
-                throw new InvalidDataException("安装包下载地址不受信任。");
+                throw new InvalidDataException("发行文件下载地址不受信任。");
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.UserAgent.ParseAdd("Penumbra-Updater/1.0");
             var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
@@ -70,7 +78,7 @@ internal static class UpdateDownload
             if (location is null) break;
             url = new Uri(url, location);
         }
-        throw new InvalidDataException("无法解析安装包的下载地址。");
+        throw new InvalidDataException("无法解析发行文件的下载地址。");
     }
 
     internal static void Cleanup(string path)

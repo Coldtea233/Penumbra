@@ -134,10 +134,14 @@ int main() {
                 "compositor blur uses the preset or custom duration");
             if(blurAnimationTick) check(WaitForSingleObject(blurAnimationTick,70)==WAIT_TIMEOUT,
                 "long fade does not wake the renderer every frame");
-            double value=blurTransition.Value(ClockMs());
+            const auto fadeIn=blurTransition;
+            double beforeReverse=ClockMs();
             SetBlurVisibility(false);
-            double reversed=blurTransition.Value(ClockMs());
-            check(blurTimerArmed&&!blurTransition.Target()&&std::abs(reversed-value)<.12,
+            // The compositor call itself can take a frame. Compare the two
+            // curves at the actual retarget time, not at two wall-clock times.
+            double afterReverse=ClockMs();
+            double atStart=blurTransition.Value(beforeReverse);
+            check(blurTimerArmed&&!blurTransition.Target()&&atStart>=fadeIn.Value(beforeReverse)-1e-5&&atStart<=fadeIn.Value(afterReverse)+1e-5,
                 "rapid reversal stays on the compositor and continues from the current opacity");
             FinishBlurAnimation();
             check(!IsWindowVisible(window)&&!blurAnimationTick&&!current.composition.brushAttached,
@@ -162,6 +166,7 @@ int main() {
         SetBlurVisibility(true);
         check(WindowAbove(window,surfaces.front().hwnd),"animation endpoint preserves ordering");
     }
+    params.animationDurationMs=800;
     HWND wallpaper=CreateWindowExW(WS_EX_NOACTIVATE,L"STATIC",L"Own color wallpaper",WS_CHILD|WS_VISIBLE,0,0,96,64,desktop,nullptr,instance,nullptr);
     for(bool includeIcons:{false,true,false,true}) {
         ClearColor();params.saturationEnabled=true;params.darkenIcons=includeIcons;params.saturation=40;

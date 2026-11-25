@@ -20,6 +20,8 @@ public sealed partial class MainWindow : Window
     private bool updatingBlurControls;
     private bool blurRadiusPending;
     private bool blurRadiusPreviewActive;
+    private static readonly DesktopBlurRate[] BlurRates = [DesktopBlurRate.VSync, DesktopBlurRate.Hz120,
+        DesktopBlurRate.Hz90, DesktopBlurRate.Hz60, DesktopBlurRate.Hz30, DesktopBlurRate.Hz15, DesktopBlurRate.Still];
     private bool wallpaperRunning, updatingSaturationControls, saturationPending, saturationPreviewActive;
     private bool? wideLayout;
     private DesktopSnapshot? snapshot;
@@ -178,6 +180,8 @@ public sealed partial class MainWindow : Window
         animationDurations = s.AnimationDurations;
         BlurEnabledCheckBox.IsOn = s.BlurEnabled;
         BlurRadiusSlider.Value = s.BlurRadius;
+        int rateIndex = Array.IndexOf(BlurRates, s.BlurRenderRate);
+        BlurRateCombo.SelectedIndex = rateIndex >= 0 ? rateIndex : Array.IndexOf(BlurRates, Settings.DefaultBlurRenderRate);
         SaturationEnabledCheckBox.IsOn = s.SaturationEnabled;
         SaturationSlider.Value = s.Saturation;
         UpdateBlurControls();
@@ -197,7 +201,11 @@ public sealed partial class MainWindow : Window
             BlurRadiusSlider.Value,
             OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000) && SaturationEnabledCheckBox.IsOn,
             SaturationSlider.Value,
-            (VignetteAnimationSpeed)(int)AnimationSpeedSlider.Value) { AnimationDurations = animationDurations };
+            (VignetteAnimationSpeed)(int)AnimationSpeedSlider.Value)
+        {
+            AnimationDurations = animationDurations,
+            BlurRenderRate = SelectedBlurRate
+        };
     }
     private async void AnimationTest_Click(object sender, RoutedEventArgs e)
     {
@@ -295,9 +303,32 @@ public sealed partial class MainWindow : Window
         SendSaturationCommand(101);
         saturationPreviewActive = false;
     }
+    private DesktopBlurRate SelectedBlurRate
+    {
+        get
+        {
+            int index = BlurRateCombo.SelectedIndex;
+            return index >= 0 && index < BlurRates.Length ? BlurRates[index] : Settings.DefaultBlurRenderRate;
+        }
+    }
+
+    private void UpdateBlurRateWarning()
+    {
+        if (BlurRateWarning is null) return;
+        BlurRateWarning.Visibility = BlurRateCombo.IsEnabled && (SelectedBlurRate is DesktopBlurRate.VSync or DesktopBlurRate.Hz120 or DesktopBlurRate.Hz90)
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void BlurRenderRate_Changed(object sender, SelectionChangedEventArgs e) => UpdateBlurRateWarning();
+
     private void UpdateBlurControls()
     {
         if (BlurRadiusSlider is null || BlurRadiusBox is null || updatingBlurControls) return;
+        if (BlurRateCombo is not null)
+        {
+            BlurRateCombo.IsEnabled = BlurEnabledCheckBox.IsEnabled && BlurEnabledCheckBox.IsOn && BlurRadiusSlider.Value > 0;
+            UpdateBlurRateWarning();
+        }
         updatingBlurControls = true;
         try { BlurRadiusBox.Value = BlurRadiusSlider.Value; }
         finally { updatingBlurControls = false; }
@@ -592,6 +623,20 @@ public sealed partial class MainWindow : Window
                 if (AnimationSpeedSlider.Value != (int)speed || ReadControls().VignetteSpeed != speed)
                     throw new InvalidOperationException("Vignette animation slider did not round-trip a preset.");
             }
+            string[] expectedLabels = ["垂直同步", "120 Hz", "90 Hz", "60 Hz", "30 Hz", "15 Hz", "静止"];
+            if (BlurRateCombo.Items.Count != expectedLabels.Length || AutomationProperties.GetName(BlurRateCombo) != "渲染帧率" ||
+                BlurRateWarning.Text != "高FPS可能会影响性能" || BlurRateWarning.Parent != BlurRateCombo.Parent ||
+                Grid.GetRow(BlurRateWarning) != Grid.GetRow(BlurRateCombo) || Grid.GetColumn(BlurRateWarning) >= Grid.GetColumn(BlurRateCombo))
+                throw new InvalidOperationException("Blur render rate selector did not initialize.");
+            for (int i = 0; i < expectedLabels.Length; i++)
+            {
+                var rate = BlurRates[i];
+                LoadControls(settings with { BlurEnabled = true, BlurRadius = 12, BlurRenderRate = rate });
+                if (BlurRateCombo.SelectedIndex != i || ReadControls().BlurRenderRate != rate ||
+                    (BlurRateCombo.SelectedItem as ComboBoxItem)?.Content?.ToString() != expectedLabels[i] ||
+                    BlurRateWarning.Visibility != (i is 0 or 1 or 2 ? Visibility.Visible : Visibility.Collapsed))
+                    throw new InvalidOperationException("Blur render rate selector did not round-trip a preset.");
+            }
         }
         finally { LoadControls(settings); }
         if (startupUpdateChecked || checkingUpdate || UpdateInfoBar.IsOpen ||
@@ -623,17 +668,36 @@ public sealed partial class MainWindow : Window
             var release = new Uri("https://github.com/Coldtea233/Penumbra/releases/tag/v1.9.1");
             PresentUpdateResult(new(UpdateState.Available, "Available fixture", "1.9.1", release), automatic: true);
             if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Title != "发现新版本 1.9.1" ||
+                UpdateActions.Visibility != Visibility.Visible || InstallUpdateButton.Visibility != Visibility.Collapsed ||
                 UpdateReleaseLink.NavigateUri != release || UpdateReleaseLink.Visibility != Visibility.Visible)
                 throw new InvalidOperationException("Available updates must offer the correct release page.");
             VerifyUpdateNoticeAppearance();
+            var installer = new UpdateAsset(release, "fixture.exe", 1, new string('0', 64));
+            PresentUpdateResult(new(UpdateState.Available, "Installer fixture", "1.9.1", release, installer), automatic: true);
+            const double narrowNoticeWidth = 300;
+            UpdateInfoBar.Width = narrowNoticeWidth;
+            Root.UpdateLayout();
+            var linkPosition = UpdateReleaseLink.TransformToVisual(UpdateInfoBar).TransformPoint(new Windows.Foundation.Point());
+            var installPosition = InstallUpdateButton.TransformToVisual(UpdateInfoBar).TransformPoint(new Windows.Foundation.Point());
+            double centerOffset = installPosition.Y + InstallUpdateButton.ActualHeight / 2 - linkPosition.Y - UpdateReleaseLink.ActualHeight / 2;
+            double gap = installPosition.X - linkPosition.X - UpdateReleaseLink.ActualWidth;
+            double right = installPosition.X + InstallUpdateButton.ActualWidth;
+            if (UpdateInfoBar.Message.Length != 0 || InstallUpdateButton.Visibility != Visibility.Visible ||
+                UpdateReleaseLink.ActualWidth <= 0 || InstallUpdateButton.ActualWidth <= 0 ||
+                Math.Abs(centerOffset) > 1 || Math.Abs(gap - UpdateActions.Spacing) > 1 || right > narrowNoticeWidth)
+                throw new InvalidOperationException($"Update actions did not fit on a compact row. Message length: {UpdateInfoBar.Message.Length}; " +
+                    $"link width: {UpdateReleaseLink.ActualWidth}; install width: {InstallUpdateButton.ActualWidth}; " +
+                    $"center offset: {centerOffset}; gap: {gap}; right: {right}.");
+            UpdateInfoBar.ClearValue(FrameworkElement.WidthProperty);
             PresentUpdateResult(new(UpdateState.Current, "当前版本已为最新发行版", DisplayVersion[1..]), automatic: false);
             if (!UpdateInfoBar.IsOpen || UpdateInfoBar.Severity != InfoBarSeverity.Success ||
                 UpdateInfoBar.Title != "当前版本已为最新发行版" || UpdateInfoBar.Message.Length != 0 ||
-                UpdateReleaseLink.NavigateUri is not null || UpdateReleaseLink.Visibility != Visibility.Collapsed)
+                UpdateActions.Visibility != Visibility.Collapsed || UpdateReleaseLink.NavigateUri is not null ||
+                UpdateReleaseLink.Visibility != Visibility.Collapsed)
                 throw new InvalidOperationException("Manual current result must not retain a stale update link.");
             VerifyUpdateNoticeAppearance();
             PresentUpdateResult(new(UpdateState.Failed, "Offline fixture"), automatic: false);
-            if (UpdateInfoBar.Severity != InfoBarSeverity.Warning || !CheckUpdateLink.IsEnabled)
+            if (UpdateInfoBar.Severity != InfoBarSeverity.Warning || UpdateInfoBar.Message != "Offline fixture" || !CheckUpdateLink.IsEnabled)
                 throw new InvalidOperationException("Failed checks must report an error and allow retry.");
             VerifyUpdateNoticeAppearance();
         }
@@ -761,18 +825,21 @@ public sealed partial class MainWindow : Window
     }
     private void PresentUpdateResult(UpdateResult result, bool automatic)
     {
-        ToolTipService.SetToolTip(CheckUpdateLink, result.Message);
-        AutomationProperties.SetHelpText(CheckUpdateLink, result.Message);
+        bool canInstall = result.State == UpdateState.Available && (result.Asset is not null || result.StoreInstallAvailable);
+        string message = canInstall ? "发现新版本" : result.Message;
+        ToolTipService.SetToolTip(CheckUpdateLink, message);
+        AutomationProperties.SetHelpText(CheckUpdateLink, message);
         if (automatic && result.State != UpdateState.Available) return;
         availableUpdate = result.State == UpdateState.Available ? result : null;
-        InstallUpdateButton.Visibility = result.Asset is not null || result.StoreInstallAvailable ? Visibility.Visible : Visibility.Collapsed;
+        InstallUpdateButton.Visibility = canInstall ? Visibility.Visible : Visibility.Collapsed;
+        UpdateActions.Visibility = canInstall || result.ReleasePage is not null ? Visibility.Visible : Visibility.Collapsed;
         UpdateInfoBar.Title = result.State switch
         {
             UpdateState.Available => result.Version is null ? "发现新版本" : "发现新版本 " + result.Version,
             UpdateState.Current => result.Message,
             _ => "检查更新失败"
         };
-        UpdateInfoBar.Message = result.State == UpdateState.Current ? string.Empty : result.Message;
+        UpdateInfoBar.Message = canInstall || result.State == UpdateState.Current ? string.Empty : result.Message;
         UpdateInfoBar.Severity = result.State switch
         {
             UpdateState.Current => InfoBarSeverity.Success,

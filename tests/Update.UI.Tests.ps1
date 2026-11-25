@@ -28,7 +28,7 @@ try{
     }
     function Verify-Update([string]$message){
         if($ExpectedState -eq 'Available'){
-            if($message -notlike '可前往 GitHub*'){throw "Expected an available update: $message"}
+            if($message -ne '发现新版本' -and $message -notlike '可前往 GitHub*'){throw "Expected an available update: $message"}
             $scroll=(Control 'SettingsScrollViewer').GetCurrentPattern([Windows.Automation.ScrollPattern]::Pattern)
             if($scroll.Current.VerticallyScrollable){$scroll.SetScrollPercent(-1,100);Start-Sleep -Milliseconds 150}
             $releaseLink=Control 'UpdateReleaseLink'
@@ -49,8 +49,10 @@ try{
     Start-Sleep -Milliseconds 150
     $manual=Wait-Update
     Verify-Update $manual
-    $message=$root.FindFirst([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$manual))
-    if(!$message){throw 'Manual update check must show an in-app result.'}
+    if($manual -ne '发现新版本'){
+        $message=$root.FindFirst([Windows.Automation.TreeScope]::Descendants,[Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty,$manual))
+        if(!$message){throw 'Manual update check must show an in-app result.'}
+    }
     if(!(Control 'ApplyButton').Current.IsEnabled -or !(Control 'CaptureButton').Current.IsEnabled){throw 'Update checking blocked desktop commands.'}
     & (Join-Path $PSScriptRoot 'Branding.UI.Tests.ps1') -ExecutablePath $ExecutablePath -ScreenshotDirectory (Join-Path $ScreenshotDirectory 'manual-result')
     [pscustomobject]@{Passed=$true;StartupGitHubCheck=$auto;ManualGitHubCheck=$manual;Version=$expectedVersion;ExpectedState=$ExpectedState;ExpectedReleaseVersion=$ExpectedReleaseVersion;VersionPrefixPreserved=$true;GrayLinkWithoutUnderline=$true;DesktopCommandsEnabled=$true;SettingsWritten=$false}|ConvertTo-Json -Compress

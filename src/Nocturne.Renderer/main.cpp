@@ -24,6 +24,7 @@
 #include <process.h>
 #include "focus_animation.h"
 #include "desktop_blur.h"
+#include "blur_snapshot.h"
 #include "blur_bounds.h"
 #include "branding.h"
 #include "wallpaper_layer.h"
@@ -41,6 +42,7 @@ struct Params {
     double opacity=.68, radius=.48, feather=.65, shape=1, cx=.5, cy=.5, blurRadius=12, saturation=40;
     int tint=0;
     bool primary=false, darkenIcons=false, focusOnly=false, blurEnabled=false, saturationEnabled=false;
+    blur_snapshot::RenderRate blurRenderRate=blur_snapshot::DefaultRenderRate;
     int animationDurationMs=static_cast<int>(focus_animation::Transition::FullDurationMs(focus_animation::Speed::Balanced));
 };
 struct Bitmap {
@@ -92,8 +94,9 @@ double frameIntervalMs=1000.0/60, detectedRefreshHz=0, nextFrameAt=0;
 focus_animation::Transition transition;
 struct BlurSurface {
     desktop_blur::Engine::Surface composition;
+    desktop_blur::ComPtr<desktop_blur::C::ICompositionDrawingSurface> snapshotTexture;
     RECT rect{}, protectedArea{};
-    bool protectionValid=false,occluded=false;
+    bool protectionValid=false,occluded=false,freezeAttempted=false,stillUnavailable=false;
 };
 std::unique_ptr<desktop_blur::Engine> blurEngine;
 std::vector<BlurSurface> blurSurfaces;
@@ -101,16 +104,19 @@ focus_animation::Transition blurTransition;
 HANDLE blurAnimationTick{};
 bool blurTimerArmed=false;
 bool blurBoundsPending=false;
+bool blurPreviewSettling=false,streamFallback=false;
 HANDLE blurPreviewProcess{};
 DWORD blurPreviewClient=0;
 HRESULT blurLastResult=S_OK;
+std::shared_ptr<blur_snapshot::Snapshot> blurSnapshot;
+HANDLE blurSnapshotThread{};
+desktop_blur::ComPtr<desktop_blur::C::ICompositionGraphicsDevice> blurStreamGraphics;
 struct ColorSurface { desktop_blur::Engine::Surface composition; wallpaper_layer::Layer layer; RECT rect{},safe{}; bool clipped=false,includeIcons=false,occluded=false; };
 std::vector<ColorSurface> colorSurfaces;
 focus_animation::Transition colorTransition;
 HANDLE colorAnimationTick{},colorPreviewProcess{},wallpaperProcess{};
 DWORD colorPreviewClient=0,wallpaperCaptureClient=0;
 bool colorTimerArmed=false,colorHostPending=false;
-double colorNextFrameAt=0;
 HRESULT colorLastResult=S_OK;
 // Opt-in diagnostics only. Keep samples in memory during the animation and
 // write once at rest, so tracing cannot stall each frame with disk I/O.
@@ -201,14 +207,14 @@ void InitializePaths() {
     } else { wchar_t temp[MAX_PATH]; GetTempPathW(MAX_PATH,temp); configDir=std::wstring(temp)+L"Nocturne"; }
     CreateDirectoryW(configDir.c_str(),nullptr); configFile=configDir+L"\\settings.ini";
 }
-void Status(const wchar_t* message) {
+void Status(const wchar_t* message,bool acknowledgeApply=true) {
     HANDLE file=CreateFileW((configDir+L"\\status.txt").c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
     if(file!=INVALID_HANDLE_VALUE) {
         int length=WideCharToMultiByte(CP_UTF8,0,message,-1,nullptr,0,nullptr,nullptr);
         std::vector<char> bytes(length); WideCharToMultiByte(CP_UTF8,0,message,-1,bytes.data(),length,nullptr,nullptr);
         DWORD written; WriteFile(file,bytes.data(),length-1,&written,nullptr); CloseHandle(file);
     }
-    if(appliedEvent) SetEvent(appliedEvent);
+    if(acknowledgeApply&&appliedEvent) SetEvent(appliedEvent);
 }
 double ReadNumber(const wchar_t* key,double fallback,double low,double high) {
     wchar_t buffer[80],*end{}; GetPrivateProfileStringW(L"vignette",key,L"",buffer,80,configFile.c_str());
@@ -227,6 +233,10 @@ void Load() {
     params.animationDurationMs=static_cast<int>(ReadNumber(durationKeys[static_cast<int>(vignetteSpeed)],
         focus_animation::Transition::FullDurationMs(vignetteSpeed),0,focus_animation::Transition::MaxDurationMs));
     params.blurEnabled=ReadNumber(L"blurEnabled",0,0,1)==1;
+    const bool legacyFreeze=ReadNumber(L"blurFreezeAfterFade",0,0,1)==1;
+    const double legacyMode=ReadNumber(L"blurMode",legacyFreeze?2:-1,0,2);
+    params.blurRenderRate=blur_snapshot::ResolveRenderRate(
+        ReadNumber(L"blurRenderRate",-2,-HUGE_VAL,HUGE_VAL),legacyMode);
     params.blurRadius=ReadNumber(L"blurRadius",12,0,48);
     params.saturationEnabled=ReadNumber(L"saturationEnabled",0,0,1)==1;
     params.saturation=ReadNumber(L"saturation",40,0,100);
@@ -500,6 +510,13 @@ void StopBlurAnimation() {
     blurTimerArmed=false;
 }
 void ClearBlur() {
+    blurPreviewSettling=false;streamFallback=false;
+    if(controller) KillTimer(controller,9);
+    if(blurEngine) for(auto& color:colorSurfaces)
+        if(color.composition.colorInput&&FAILED(blurEngine->SetColorInput(color.composition,{})))
+            blurEngine->SetSampling(color.composition,false);
+    if(blurSnapshot) blurSnapshot->Cancel();
+    blurStreamGraphics.Reset();
     if(blurPreviewProcess) { CloseHandle(blurPreviewProcess); blurPreviewProcess=nullptr; }
     blurPreviewClient=0;
     StopBlurAnimation(); blurTransition.Reset(false);
@@ -572,12 +589,15 @@ bool PositionSurface(Surface& s, bool show) {
     // activate the owner, and do not promote the overlay to HWND_TOP on failure.
     // Protect the original icon pixels BEFORE the whole-desktop Gaussian.
     // A sharp icon-shaped hole must never be drawn over already blurred icons.
-    HWND blurAbove=nullptr;
+    HWND blurAbove=nullptr,frozenBelow=nullptr;
     for(const auto& blur:blurSurfaces)
         if(EqualRect(&s.rect,&blur.rect)&&DesktopPlacementCurrent(blur.composition.hwnd,blur.rect)) {
-            blurAbove=blur.composition.hwnd;break;
+            if(blur.composition.frozen) frozenBelow=blur.composition.hwnd;
+            else blurAbove=blur.composition.hwnd;
+            break;
         }
     if(!PlaceDesktopPopup(s.hwnd,s.rect,show&&!paused&&!capturingPreview&&(transition.Target()||animationTimerArmed),blurAbove)) return false;
+    if(frozenBelow&&IsWindowVisible(s.hwnd)&&!PlaceDesktopPopup(frozenBelow,s.rect,true,s.hwnd)) return false;
     // Whole-desktop color belongs BELOW the vignette (preserving its tint),
     // which in turn belongs below blur. A newly shown vignette may initially
     // be at the shell bottom; repair only an actually inverted pair.
@@ -597,11 +617,13 @@ bool ProtectBlurTaskbar(BlurSurface& s) {
     s.protectedArea=safe; s.protectionValid=true;
     return true;
 }
+bool PositionColorSurfaces();
 bool PositionBlurSurfaces() {
     for(auto& s:blurSurfaces) {
         if(!ProtectBlurTaskbar(s)) { ShowWindow(s.composition.hwnd,SW_HIDE); return false; }
         HWND window=s.composition.hwnd;
-        bool visible=render_budget::ShouldSample(true,!paused&&!capturingPreview&&(blurTransition.Target()||blurTimerArmed),s.occluded);
+        bool visible=render_budget::ShouldSample(!s.stillUnavailable,
+            !paused&&!capturingPreview&&(blurTransition.Target()||blurTimerArmed),s.occluded);
         // Remove the actual backdrop graph when hidden/fully occluded. Keeping
         // only opacity=0 still leaves a live source in the retained visual tree.
         if(!visible) {
@@ -610,30 +632,225 @@ bool PositionBlurSurfaces() {
             continue;
         }
         if(!blurEngine||FAILED(blurEngine->SetSampling(s.composition,true))) return false;
-        if(!PlaceDesktopPopup(window,s.rect,visible)) return false;
+        HWND above=nullptr;
+        if(s.composition.frozen) {
+            for(const auto& color:colorSurfaces)
+                if(color.includeIcons&&EqualRect(&s.rect,&color.rect)&&DesktopPlacementCurrent(color.composition.hwnd,color.rect)) {
+                    above=color.composition.hwnd; break;
+                }
+            if(!above) for(const auto& vignette:surfaces)
+                if(EqualRect(&s.rect,&vignette.rect)&&DesktopPlacementCurrent(vignette.hwnd,vignette.rect)) {
+                    above=vignette.hwnd; break;
+                }
+        }
+        if(!PlaceDesktopPopup(window,s.rect,visible,above)) return false;
     }
     // Recheck the pair on every show/recovery, not just at construction. The
     // cache retains correct relative order without repeatedly restacking DWM.
     for(auto& s:surfaces) if(IsWindowVisible(s.hwnd)&&!PositionSurface(s,true)) return false;
+    if(!colorSurfaces.empty()&&!PositionColorSurfaces()) ClearColor();
     return true;
+}
+bool CanFreezeBlur() {
+    return params.blurRenderRate!=blur_snapshot::RenderRate::VSync&&params.blurEnabled&&!paused&&!capturingPreview&&
+        blurTransition.Target()&&!blurTimerArmed&&!blurPreviewSettling&&!colorTimerArmed&&
+        !wallpaperCaptureClient&&blurEngine&&IsWindow(desktop);
+}
+void FailBlur(bool acknowledgeApply=true);
+void ReportStillBlurFailure() {
+    if(!PositionBlurSurfaces()) {
+        FailBlur(false);
+        return;
+    }
+    Status(L"部分或全部屏幕无法定格桌面 · 已停用受影响屏幕的模糊",false);
+}
+unsigned __stdcall RunBlurSnapshot(void* context) {
+    std::unique_ptr<std::shared_ptr<blur_snapshot::Snapshot>> request(
+        static_cast<std::shared_ptr<blur_snapshot::Snapshot>*>(context));
+    if(SUCCEEDED(RoInitialize(RO_INIT_MULTITHREADED))) {
+        blur_snapshot::RunCapture(**request);
+        request.reset();
+        RoUninitialize();
+    }
+    return 0;
+}
+void StartBlurSnapshot() {
+    if(blurSnapshotThread||!CanFreezeBlur()) return;
+    const auto needsSnapshot=[](const BlurSurface& surface) {
+        return !surface.occluded&&!surface.freezeAttempted&&surface.composition.brushAttached;
+    };
+    try {
+        std::shared_ptr<blur_snapshot::Snapshot> snapshot;
+        for(const auto& s:blurSurfaces) {
+            if(!needsSnapshot(s)) continue;
+            if(!snapshot) snapshot=std::make_shared<blur_snapshot::Snapshot>();
+            snapshot->monitors.push_back({s.rect,s.composition.radius,{}});
+        }
+        if(!snapshot) return;
+        snapshot->host=desktop;
+        if(streamFallback||!blur_snapshot::IsFixedRate(params.blurRenderRate)||snapshot->EnableStreaming(params.blurRenderRate)) {
+            auto* context=new std::shared_ptr<blur_snapshot::Snapshot>(snapshot);
+            const auto thread=_beginthreadex(nullptr,0,RunBlurSnapshot,context,0,nullptr);
+            if(thread) {
+                for(auto& surface:blurSurfaces) if(needsSnapshot(surface)) surface.freezeAttempted=true;
+                blurSnapshot=std::move(snapshot);
+                blurSnapshotThread=reinterpret_cast<HANDLE>(thread);
+                return;
+            }
+            delete context;
+        }
+    } catch(const std::bad_alloc&) {
+        // Treat allocation failure the same as failure to start the worker.
+    }
+    for(auto& surface:blurSurfaces) if(needsSnapshot(surface)) {
+        surface.freezeAttempted=true;
+        surface.stillUnavailable=true;
+    }
+    ReportStillBlurFailure();
+}
+bool ThawBlur() {
+    if(blurSnapshot) blurSnapshot->Cancel();
+    blurStreamGraphics.Reset();
+    bool needsReposition=false;
+    for(auto& s:blurSurfaces) {
+        s.freezeAttempted=false;
+        needsReposition|=s.stillUnavailable;
+        s.stillUnavailable=false;
+        s.snapshotTexture.Reset();
+        if(s.composition.frozen) {
+            if(FAILED(blurEngine->SetFrozenBrush(s.composition,{}))) return false;
+            needsReposition=true;
+        }
+    }
+    return !needsReposition||PositionBlurSurfaces();
 }
 bool SetLiveBlurRadius(float radius) {
     if(!params.blurEnabled||!blurEngine||blurSurfaces.empty()) return false;
     float previous=blurSurfaces.front().composition.radius;
+    if(previous==radius) return true;
+    if(!ThawBlur()) return false;
     for(auto& s:blurSurfaces) if(FAILED(blurEngine->SetRadius(s.composition,radius))) {
         for(auto& rollback:blurSurfaces) blurEngine->SetRadius(rollback.composition,previous);
         return false;
     }
     return true;
 }
-void EndBlurRadiusPreview() {
+void EndBlurRadiusPreview(bool restartSnapshot=true) {
     SetLiveBlurRadius(static_cast<float>(params.blurRadius));
     if(blurPreviewProcess) { CloseHandle(blurPreviewProcess); blurPreviewProcess=nullptr; }
     blurPreviewClient=0;
+    if(restartSnapshot) StartBlurSnapshot();
 }
-void FailBlur() {
+void SettleBlurPreview() {
+    blurPreviewSettling=controller&&SetTimer(controller,9,150,nullptr);
+    if(!blurPreviewSettling) StartBlurSnapshot();
+}
+void FailBlur(bool acknowledgeApply) {
     ClearBlur();
-    Status(L"桌面模糊不可用 · 已安全关闭模糊，暗角不受影响");
+    Status(L"桌面模糊不可用 · 已安全关闭模糊，暗角不受影响",acknowledgeApply);
+}
+void DegradeBlurStream() {
+    if(blurSnapshot) blurSnapshot->Cancel();
+    streamFallback=true;
+    for(auto& surface:blurSurfaces) {
+        surface.snapshotTexture.Reset();
+        if(!surface.composition.frozen) surface.freezeAttempted=false;
+    }
+    blurStreamGraphics.Reset();
+    Status(L"系统暂时无法按指定帧率捕获桌面 · 改用静止模糊",false);
+}
+void UpdateBlurStream() {
+    auto& snapshot=*blurSnapshot;
+    if(snapshot.cancelled.load()) return;
+    if(snapshot.host!=desktop||!CanFreezeBlur()) {
+        if(!ThawBlur()) FailBlur();
+        return;
+    }
+    if(!blurStreamGraphics&&FAILED(blurEngine->SnapshotDevice(snapshot.drawingDevice.Get(),blurStreamGraphics))) {
+        DegradeBlurStream();
+        return;
+    }
+    bool displayed=false,changed=false;
+    for(auto& surface:blurSurfaces) {
+        if(surface.occluded) continue;
+        for(const auto& frame:snapshot.monitors) {
+            if(!frame.ready||!EqualRect(&frame.screen,&surface.rect)||frame.radius!=surface.composition.radius) continue;
+            HRESULT hr;
+            if(surface.snapshotTexture) {
+                hr=blurEngine->UpdateSnapshot(surface.snapshotTexture.Get(),frame.bitmap.Get());
+            } else {
+                desktop_blur::ComPtr<desktop_blur::C::ICompositionBrush> brush;
+                hr=blurEngine->SnapshotBrush(blurStreamGraphics.Get(),frame.bitmap.Get(),brush,&surface.snapshotTexture);
+                if(SUCCEEDED(hr)) hr=blurEngine->SetFrozenBrush(surface.composition,std::move(brush));
+                if(SUCCEEDED(hr)) { changed=true; surface.stillUnavailable=false; }
+                else surface.snapshotTexture.Reset();
+            }
+            if(FAILED(hr)) {
+                // Keep the next frame from updating a surface after a failed submission.
+                DegradeBlurStream();
+                return;
+            }
+            displayed=true;
+            break;
+        }
+    }
+    // A capture may cover only some monitors. Never leave the others on a
+    // compositor-rate blur for the lifetime of a successful stream.
+    for(auto& surface:blurSurfaces) if(!surface.occluded&&surface.freezeAttempted&&
+        !surface.composition.frozen&&!surface.stillUnavailable) {
+        surface.stillUnavailable=true;
+        changed=true;
+    }
+    if(changed&&!PositionBlurSurfaces()) {
+        FailBlur(false);
+        return;
+    }
+    if(displayed) SetEvent(snapshot.consumed);
+    else DegradeBlurStream();
+}
+void FinishBlurSnapshot() {
+    CloseHandle(blurSnapshotThread);
+    blurSnapshotThread=nullptr;
+    auto snapshot=std::move(blurSnapshot);
+    const bool current=!snapshot->cancelled.load()&&snapshot->host==desktop;
+    if(snapshot->streaming) {
+        if(current&&CanFreezeBlur()) {
+            DegradeBlurStream();
+        }
+        StartBlurSnapshot();
+        return;
+    }
+    if(current&&CanFreezeBlur()) {
+        desktop_blur::ComPtr<desktop_blur::C::ICompositionGraphicsDevice> graphics;
+        const bool haveGraphics=snapshot->drawingDevice&&
+            SUCCEEDED(blurEngine->SnapshotDevice(snapshot->drawingDevice.Get(),graphics));
+        bool changed=false,failed=false;
+        for(auto& surface:blurSurfaces) {
+            const auto frame=std::find_if(snapshot->monitors.begin(),snapshot->monitors.end(),[&](const auto& item) {
+                return EqualRect(&item.screen,&surface.rect)&&item.radius==surface.composition.radius;
+            });
+            if(frame==snapshot->monitors.end()||surface.composition.frozen) continue;
+            desktop_blur::ComPtr<desktop_blur::C::ICompositionBrush> brush;
+            const bool attached=haveGraphics&&frame->ready&&frame->bitmap&&
+                SUCCEEDED(blurEngine->SnapshotBrush(graphics.Get(),frame->bitmap.Get(),brush))&&
+                SUCCEEDED(blurEngine->SetFrozenBrush(surface.composition,std::move(brush)));
+            surface.stillUnavailable=!attached;
+            failed|=!attached;
+            changed=true;
+        }
+        if(failed) ReportStillBlurFailure();
+        else if(changed&&!PositionBlurSurfaces()) FailBlur(false);
+    } else if(current&&!CanFreezeBlur()) {
+        // A short preview lease can overlap delivery. Wait for its end.
+        for(auto& s:blurSurfaces) if(!s.composition.frozen) s.freezeAttempted=false;
+    }
+    StartBlurSnapshot();
+}
+void RestartBlurStreamAfterFade() {
+    if(blur_snapshot::IsFixedRate(params.blurRenderRate)&&
+        std::any_of(blurSurfaces.begin(),blurSurfaces.end(),[](const auto& surface) { return !!surface.snapshotTexture; })) {
+        if(!ThawBlur()) FailBlur();
+    }
 }
 void RefreshBlurPolicy(HWND hwnd) {
     if(!params.blurEnabled&&!params.saturationEnabled) return;
@@ -656,11 +873,23 @@ void FinishBlurAnimation() {
     for(auto& s:blurSurfaces) if(FAILED(blurEngine->FinishOpacityAnimation(s.composition,visible?1.0f:0.0f))) {
         FailBlur(); return;
     }
-    if(visible&&!PositionBlurSurfaces()) FailBlur();
+    if(!visible) {
+        if(!ThawBlur()) FailBlur();
+    } else {
+        // If fade-out was reversed, keep its last frame through the reversal,
+        // then reconnect the stream once the new fade-in has settled.
+        RestartBlurStreamAfterFade();
+        if(PositionBlurSurfaces()) StartBlurSnapshot();
+        else FailBlur();
+    }
 }
 void SetBlurVisibility(bool visible) {
     visible=visible&&params.blurEnabled&&!paused;
     if(blurSurfaces.empty()||visible==blurTransition.Target()) return;
+    if(!visible&&blurSnapshot) {
+        blurSnapshot->Cancel();
+        for(auto& s:blurSurfaces) if(!s.composition.frozen) s.freezeAttempted=false;
+    }
     const double now=ClockMs();
     if(!blurTransition.Retarget(visible,now,params.animationDurationMs)) return;
     if(params.animationDurationMs==0) { FinishBlurAnimation(); return; }
@@ -699,7 +928,18 @@ bool PositionColorSurfaces() {
             if(!SetWindowRgn(s.composition.hwnd,region,FALSE)) { DeleteObject(region); return false; }
             s.safe=safe; s.clipped=true;
         }
-        bool visible=render_budget::ShouldSample(s.composition.radius<1,
+        desktop_blur::ComPtr<desktop_blur::C::ICompositionBrush> texture;
+        bool coveredByStill=false;
+        if(blurTransition.Target()&&!blurTimerArmed&&!capturingPreview&&!wallpaperCaptureClient) {
+            for(const auto& blur:blurSurfaces) if(blur.composition.frozenAttached&&
+                EqualRect(&s.rect,&blur.rect)&&IsWindowVisible(blur.composition.hwnd)) {
+                if(s.includeIcons) texture=blur.composition.frozen;
+                else coveredByStill=!blur.snapshotTexture;
+                break;
+            }
+        }
+        if(!blurEngine||FAILED(blurEngine->SetColorInput(s.composition,std::move(texture)))) return false;
+        bool visible=render_budget::ShouldSample(s.composition.radius<1&&!coveredByStill,
             !paused&&!capturingPreview&&!wallpaperCaptureClient&&(colorTransition.Target()||colorTimerArmed),s.occluded);
         if(!visible) {
             if(IsWindowVisible(s.composition.hwnd)) ShowWindow(s.composition.hwnd,SW_HIDE);
@@ -712,54 +952,68 @@ bool PositionColorSurfaces() {
             HWND above=nullptr;
             for(const auto& vignette:surfaces)
                 if(EqualRect(&s.rect,&vignette.rect)&&DesktopPlacementCurrent(vignette.hwnd,vignette.rect)) { above=vignette.hwnd;break; }
-            if(!above) for(const auto& blur:blurSurfaces)
-                if(EqualRect(&s.rect,&blur.rect)&&DesktopPlacementCurrent(blur.composition.hwnd,blur.rect)) { above=blur.composition.hwnd;break; }
+            HWND frozenBelow=nullptr;
+            for(const auto& blur:blurSurfaces)
+                if(EqualRect(&s.rect,&blur.rect)&&DesktopPlacementCurrent(blur.composition.hwnd,blur.rect)) {
+                    if(blur.composition.frozen) frozenBelow=blur.composition.hwnd;
+                    else if(!above) above=blur.composition.hwnd;
+                    break;
+                }
             if(!PlaceDesktopPopup(s.composition.hwnd,s.rect,visible,above)) return false;
+            if(frozenBelow&&!PlaceDesktopPopup(frozenBelow,s.rect,true,s.composition.hwnd)) return false;
         } else if(!wallpaper_layer::Place(s.composition.hwnd,s.layer,s.rect,visible)) return false;
     }
     return true;
 }
 void AdvanceColorAnimation() {
-    double now=ClockMs(); bool running=colorTransition.Running(now);
-    float value=static_cast<float>(running?colorTransition.Value(now):(colorTransition.Target()?1:0));
-    for(auto& s:colorSurfaces) if(FAILED(s.composition.visual->put_Opacity(value))) { ClearColor(); return; }
-    if(!running) {
-        colorTransition.Reset(colorTransition.Target()); StopColorAnimation();
-        if(!PositionColorSurfaces()) ClearColor();
-        return;
+    const bool visible=colorTransition.Target();
+    colorTransition.Reset(visible); StopColorAnimation();
+    for(auto& s:colorSurfaces) if(FAILED(blurEngine->FinishOpacityAnimation(s.composition,visible?1.f:0.f))) {
+        ClearColor(); return;
     }
-    do { colorNextFrameAt+=frameIntervalMs; } while(colorNextFrameAt<=now);
-    LARGE_INTEGER due{}; due.QuadPart=-(LONGLONG)std::max(1.0,10000*std::min(colorNextFrameAt-now,colorTransition.Remaining(now)));
-    if(!SetWaitableTimer(colorAnimationTick,&due,0,nullptr,nullptr,FALSE)) ClearColor();
+    if(!PositionColorSurfaces()) ClearColor();
 }
 void SetColorVisibility(bool visible) {
     visible=visible&&params.saturationEnabled&&!paused&&wallpaperProcess;
     if(colorSurfaces.empty()||visible==colorTransition.Target()) return;
-    double now=ClockMs(); if(!colorTransition.Retarget(visible,now)) return;
+    if(std::any_of(colorSurfaces.begin(),colorSurfaces.end(),[](const auto& s){return !s.includeIcons;})&&
+        !ThawBlur()) FailBlur();
+    double now=ClockMs(); if(!colorTransition.Retarget(visible,now,params.animationDurationMs)) return;
     if(!colorTimerArmed) {
         colorAnimationTick=CreateWaitableTimerExW(nullptr,nullptr,0x00000002,TIMER_ALL_ACCESS);
         if(!colorAnimationTick) colorAnimationTick=CreateWaitableTimerW(nullptr,FALSE,nullptr);
         colorTimerArmed=colorAnimationTick!=nullptr;
-        if(!colorTimerArmed) { ClearColor(); return; }
+        if(!colorTimerArmed) { AdvanceColorAnimation(); return; }
     }
-    for(auto& s:colorSurfaces) if(FAILED(s.composition.visual->put_Opacity(static_cast<float>(colorTransition.Value(now))))) { ClearColor(); return; }
     if(!PositionColorSurfaces()) { ClearColor(); return; }
-    colorNextFrameAt=now; AdvanceColorAnimation();
+    const double duration=colorTransition.Remaining(now);
+    desktop_blur::ComPtr<desktop_blur::C::ICompositionAnimation> animation;
+    if(duration<=0||FAILED(blurEngine->CreateOpacityAnimation(duration,visible?1.f:0.f,animation))) {
+        AdvanceColorAnimation();return;
+    }
+    for(auto& s:colorSurfaces) if(FAILED(blurEngine->StartOpacityAnimation(s.composition,animation.Get()))) {
+        AdvanceColorAnimation();return;
+    }
+    LARGE_INTEGER due{};due.QuadPart=-static_cast<LONGLONG>(std::ceil((duration+frameIntervalMs)*10000));
+    if(!SetWaitableTimer(colorAnimationTick,&due,0,nullptr,nullptr,FALSE)) AdvanceColorAnimation();
 }
 bool SetLiveSaturation(float percentage) {
     if(!params.saturationEnabled||!blurEngine||colorSurfaces.empty()) return false;
     float value=std::isfinite(percentage)?std::clamp(percentage,0.f,100.f)/100:1.f;
     float previous=colorSurfaces.front().composition.radius;
+    if(previous!=value&&std::any_of(colorSurfaces.begin(),colorSurfaces.end(),[](const auto& s){return !s.includeIcons;})&&
+        !ThawBlur()) FailBlur();
     for(auto& s:colorSurfaces) if(FAILED(blurEngine->SetRadius(s.composition,value))) {
         for(auto& rollback:colorSurfaces) blurEngine->SetRadius(rollback.composition,previous);
         return false;
     }
     return PositionColorSurfaces();
 }
-void EndSaturationPreview() {
+void EndSaturationPreview(bool restartSnapshot=true) {
     SetLiveSaturation(static_cast<float>(params.saturation));
     if(colorPreviewProcess) { CloseHandle(colorPreviewProcess); colorPreviewProcess=nullptr; }
     colorPreviewClient=0;
+    if(restartSnapshot) StartBlurSnapshot();
 }
 std::vector<ColorSurface> PlanColorSurfaces(const std::vector<Surface>& monitors,const std::vector<wallpaper_layer::Layer>& layers) {
     std::vector<ColorSurface> desired;
@@ -1013,8 +1267,9 @@ void UpdateWindowState() {
     SetBlurVisibility(WantsDesktopBlur(params.blurEnabled,paused,hasWindows,kind,blurTransition.Target()));
     SetColorVisibility(WantsDesktopBlur(params.saturationEnabled,paused,hasWindows,kind,colorTransition.Target()));
     if(budgetChanged) {
+        if(blur_snapshot::IsFixedRate(params.blurRenderRate)&&!ThawBlur()) FailBlur();
         if(!PositionBlurSurfaces()) FailBlur();
-        if(!PositionColorSurfaces()) ClearColor();
+        StartBlurSnapshot();
     }
 }
 void QueueOnce(UINT message,bool& pending) {
@@ -1213,8 +1468,8 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         capturingPreview=wp!=0;
         if(capturingPreview) SetTimer(hwnd,4,3000,nullptr); else KillTimer(hwnd,4);
         for(auto& s:surfaces) PositionSurface(s,true);
-        PositionBlurSurfaces();
-        if(!PositionColorSurfaces()) ClearColor();
+        if(!PositionBlurSurfaces()) FailBlur(false);
+        if(!capturingPreview) StartBlurSnapshot();
         return 1;
     }
     if(taskbarCreated && msg==taskbarCreated) { AddTray(); SetTimer(hwnd,2,1500,nullptr); return 0; }
@@ -1234,6 +1489,7 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
             if(client==wallpaperCaptureClient) {
                 wallpaperCaptureClient=0;KillTimer(hwnd,7);
                 if(!PositionColorSurfaces()) ClearColor();
+                StartBlurSnapshot();
             }
             return 1;
         }
@@ -1244,14 +1500,14 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(wp>100||!client||colorSurfaces.empty()) return 0;
         if(colorPreviewClient!=client) {
             HANDLE process=OpenProcess(SYNCHRONIZE,FALSE,client);if(!process) return 0;
-            EndSaturationPreview();colorPreviewProcess=process;colorPreviewClient=client;
+            EndSaturationPreview(false);colorPreviewProcess=process;colorPreviewClient=client;
         }
-        return SetLiveSaturation(static_cast<float>(wp))?static_cast<LRESULT>(wp+1):0;
+        if(!SetLiveSaturation(static_cast<float>(wp))) return 0;
+        SettleBlurPreview(); return static_cast<LRESULT>(wp+1);
     }
     case BlurBoundsMessage:
         blurBoundsPending=false;
         if(!PositionBlurSurfaces()) FailBlur();
-        if(!PositionColorSurfaces()) ClearColor();
         return 0;
     case BlurRadiusMessage: {
         DWORD client=static_cast<DWORD>(lp);
@@ -1261,9 +1517,10 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         if(blurPreviewClient!=client) {
             HANDLE process=OpenProcess(SYNCHRONIZE,FALSE,client);
             if(!process) return 0;
-            EndBlurRadiusPreview(); blurPreviewProcess=process; blurPreviewClient=client;
+            EndBlurRadiusPreview(false); blurPreviewProcess=process; blurPreviewClient=client;
         }
-        return SetLiveBlurRadius(static_cast<float>(wp))?static_cast<LRESULT>(wp+1):0;
+        if(!SetLiveBlurRadius(static_cast<float>(wp))) return 0;
+        SettleBlurPreview(); return static_cast<LRESULT>(wp+1);
     }
     case ReorderMessage: reorderPending=false; SetTimer(hwnd,3,60,nullptr); return 0;
     case WindowStateMessage: windowStatePending=false; UpdateWindowState(); return 0;
@@ -1283,6 +1540,10 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         // Theme, animation preference and unrelated app broadcasts do not
         // change our mask. Rebuilding for all of them cancelled live fades.
         if(wp==SPI_SETWORKAREA||wp==SPI_SETICONMETRICS) SetTimer(hwnd,2,700,nullptr);
+        if(wp==SPI_SETDESKWALLPAPER&&params.blurRenderRate!=blur_snapshot::RenderRate::VSync) {
+            if(!ThawBlur()) FailBlur();
+            StartBlurSnapshot();
+        }
         if((params.blurEnabled||params.saturationEnabled)&&(wp==SPI_SETHIGHCONTRAST||(lp&&wcscmp(reinterpret_cast<const wchar_t*>(lp),L"ImmersiveColorSet")==0))) {
             RefreshBlurPolicy(hwnd);
         }
@@ -1300,11 +1561,14 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         trayIcon.Update(instance,controller,TrayId,TrayMessage);
         return 0;
     case WM_TIMER:
+        if(wp==9) {
+            KillTimer(hwnd,9); blurPreviewSettling=false; StartBlurSnapshot(); return 0;
+        }
         if(wp==4) {
             KillTimer(hwnd,4); capturingPreview=false;
             for(auto& s:surfaces) PositionSurface(s,true);
-            PositionBlurSurfaces();
-            if(!PositionColorSurfaces()) ClearColor();
+            if(!PositionBlurSurfaces()) FailBlur(false);
+            StartBlurSnapshot();
         }
         else if(wp==5) {
             KillTimer(hwnd,5);
@@ -1331,6 +1595,7 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         else if(wp==7) {
             KillTimer(hwnd,7);wallpaperCaptureClient=0;
             if(!PositionColorSurfaces()) ClearColor();
+            StartBlurSnapshot();
         }
         else if(wp==8) {
             KillTimer(hwnd,8);occlusionSettling=false;UpdateWindowState();
@@ -1354,8 +1619,7 @@ LRESULT CALLBACK ControllerProc(HWND hwnd,UINT msg,WPARAM wp,LPARAM lp) {
         else if(wp==3) {
             KillTimer(hwnd,3);
             for(auto& s:surfaces) PositionSurface(s, true);
-            PositionBlurSurfaces();
-            if(!PositionColorSurfaces()) ClearColor();
+            if(!PositionBlurSurfaces()) FailBlur(false);
         }
         return 0;
     case WM_QUERYENDSESSION: return TRUE;
@@ -1422,7 +1686,7 @@ int SelfTest() {
     return 0;
 }
 bool DispatchWork(DWORD timeout=INFINITE) {
-    HANDLE events[9]{stopEvent,reloadEvent};
+    HANDLE events[11]{stopEvent,reloadEvent};
     DWORD count=2,darkIndex=MAXDWORD,blurIndex=MAXDWORD,previewIndex=MAXDWORD,colorIndex=MAXDWORD,colorPreviewIndex=MAXDWORD,wallpaperIndex=MAXDWORD;
     if(animationTimerArmed) { darkIndex=count; events[count++]=animationTick; }
     if(blurTimerArmed) { blurIndex=count; events[count++]=blurAnimationTick; }
@@ -1432,6 +1696,10 @@ bool DispatchWork(DWORD timeout=INFINITE) {
     if(wallpaperProcess) { wallpaperIndex=count;events[count++]=wallpaperProcess; }
     const DWORD iconIndex=iconCaptureThread?count:MAXDWORD;
     if(iconCaptureThread) events[count++]=iconCaptureThread;
+    const DWORD snapshotIndex=blurSnapshotThread?count:MAXDWORD;
+    if(blurSnapshotThread) events[count++]=blurSnapshotThread;
+    const DWORD blurFrameIndex=blurSnapshot&&blurSnapshot->streaming?count:MAXDWORD;
+    if(blurFrameIndex!=MAXDWORD) events[count++]=blurSnapshot->ready;
     if(iconCaptureDeadline) {
         const ULONGLONG now=GetTickCount64();
         const DWORD remaining=now<iconCaptureDeadline?static_cast<DWORD>(iconCaptureDeadline-now):0;
@@ -1443,11 +1711,13 @@ bool DispatchWork(DWORD timeout=INFINITE) {
     if(darkIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+darkIndex) AdvanceAnimation();
     if(blurIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+blurIndex) FinishBlurAnimation();
     if(previewIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+previewIndex) EndBlurRadiusPreview();
-    if(colorIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorIndex) AdvanceColorAnimation();
+    if(colorIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorIndex) { AdvanceColorAnimation(); StartBlurSnapshot(); }
     if(colorPreviewIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+colorPreviewIndex) EndSaturationPreview();
     if(wallpaperIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+wallpaperIndex) ClearColor();
     if(iconIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+iconIndex) FinishIconCapture();
-    if(wait==WAIT_OBJECT_0+count) {
+    if(snapshotIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+snapshotIndex) FinishBlurSnapshot();
+    if(blurFrameIndex!=MAXDWORD&&wait==WAIT_OBJECT_0+blurFrameIndex) UpdateBlurStream();
+    if(wait!=WAIT_TIMEOUT) {
         MSG msg; unsigned messages=0;
         while(messages++<32&&PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)) {
             if(msg.message==WM_QUIT) return false;
@@ -1533,5 +1803,6 @@ int WINAPI wWinMain(HINSTANCE app,HINSTANCE,PWSTR args,int) {
     // A stalled Explorer may still be painting. Quit without joining the worker.
     if(iconCaptureThread) CloseHandle(iconCaptureThread);
     Clear(); ReleaseIconMaskShare(); blurEngine.reset(); trayIcon.Reset();
+    if(blurSnapshotThread) CloseHandle(blurSnapshotThread);
     DestroyWindow(controller); CloseHandle(stopEvent); CloseHandle(reloadEvent); CloseHandle(appliedEvent); CloseHandle(mutex); return 0;
 }
